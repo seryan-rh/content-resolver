@@ -2411,11 +2411,13 @@ class Analyzer():
             target_pkg["dependency_of_pkg_nevrs"] = set()
             target_pkg["hard_dependency_of_pkg_nevrs"] = set()
             target_pkg["weak_dependency_of_pkg_nevrs"] = set()
+            target_pkg["reverse_weak_dependency_of_pkg_nevrs"] = set()
 
             # Dependency of RPM Names
             target_pkg["dependency_of_pkg_names"] = {} # of set() of nevrs
             target_pkg["hard_dependency_of_pkg_names"] = {} # of set() of nevrs
             target_pkg["weak_dependency_of_pkg_names"] = {} # if set() of nevrs
+            target_pkg["reverse_weak_dependency_of_pkg_names"] = {} # if set() of nevrs
 
     
     def _populate_pkg_or_srpm_relations_fields(self, target_pkg, source_pkg, type = None, view = None):
@@ -2546,10 +2548,35 @@ class Analyzer():
                     if pkg_name not in target_pkg["weak_dependency_of_pkg_names"]:
                         target_pkg["weak_dependency_of_pkg_names"][pkg_name] = set()
                     target_pkg["weak_dependency_of_pkg_names"][pkg_name].add(pkg_nevr)
-            
+
+            # Supplements dependency of
+            for list_type in ["supplements"]:
+                for pkg_id in source_pkg["{}_by".format(list_type)]:
+                    pkg_name = pkg_id_to_name(pkg_id)
+
+                    # This only happens in addon views, and only rarely.
+                    # (see the long comment above)
+                    if pkg_id not in view["pkgs"]:
+                        view_conf_id = view["view_conf_id"]
+                        view_conf = self.configs["views"][view_conf_id]
+                        if view_conf["type"] == "addon":
+                            continue
+
+                    pkg = view["pkgs"][pkg_id]
+                    pkg_nevr = "{name}-{evr}".format(
+                        name=pkg["name"],
+                        evr=pkg["evr"]
+                    )
+                    target_pkg["reverse_weak_dependency_of_pkg_nevrs"].add(pkg_nevr)
+
+                    if pkg_name not in target_pkg["reverse_weak_dependency_of_pkg_names"]:
+                        target_pkg["reverse_weak_dependency_of_pkg_names"][pkg_name] = set()
+                    target_pkg["reverse_weak_dependency_of_pkg_names"][pkg_name].add(pkg_nevr)
+
             # All types of dependency
             target_pkg["dependency_of_pkg_nevrs"].update(target_pkg["hard_dependency_of_pkg_nevrs"])
             target_pkg["dependency_of_pkg_nevrs"].update(target_pkg["weak_dependency_of_pkg_nevrs"])
+            target_pkg["dependency_of_pkg_nevrs"].update(target_pkg["reverse_weak_dependency_of_pkg_nevrs"])
 
             for pkg_name, pkg_nevrs in target_pkg["hard_dependency_of_pkg_names"].items():
                 if pkg_name not in target_pkg["dependency_of_pkg_names"]:
@@ -2562,6 +2589,15 @@ class Analyzer():
                     target_pkg["dependency_of_pkg_names"][pkg_name] = set()
                 
                 target_pkg["dependency_of_pkg_names"][pkg_name].update(pkg_nevrs)
+
+                
+            for pkg_name, pkg_nevrs in target_pkg["reverse_weak_dependency_of_pkg_names"].items():
+                if pkg_name not in target_pkg["reverse_weak_dependency_of_pkg_names"]:
+                    target_pkg["reverse_weak_dependency_of_pkg_names"][pkg_name] = set()
+                if pkg_name == "hunspell-en":
+                    print("REACHED")
+                
+                target_pkg["reverse_weak_dependency_of_pkg_names"][pkg_name].update(pkg_nevrs)
 
             
 
