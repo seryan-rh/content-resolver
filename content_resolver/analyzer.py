@@ -1,4 +1,5 @@
 import tempfile, os, json, datetime, dnf, urllib.request, sys, koji
+import time
 
 import multiprocessing, asyncio
 from content_resolver.utils import dump_data, load_data, log, err_log, pkg_id_to_name, size, workload_id_to_conf_id, url_to_id
@@ -370,6 +371,7 @@ class Analyzer():
             required_by = set()
             recommended_by = set()
             suggested_by = set()
+            supplements = set()
 
             for dep_pkg in dnf_query.filter(requires=[pkg]):
                 dep_pkg_id = "{name}-{evr}.{arch}".format(
@@ -395,10 +397,19 @@ class Analyzer():
             #        arch=dep_pkg.arch
             #    )
             #    suggested_by.add(dep_pkg_id)
+
+            for dep_pkg in dnf_query.filter(supplements=[pkg]):
+                dep_pkg_id = "{name}-{evr}.{arch}".format(
+                    name=dep_pkg.name,
+                    evr=dep_pkg.evr,
+                    arch=dep_pkg.arch
+                )
+                supplements.add(dep_pkg_id)
             
             relations[pkg_id] = {}
             relations[pkg_id]["required_by"] = sorted(list(required_by))
             relations[pkg_id]["recommended_by"] = sorted(list(recommended_by))
+            relations[pkg_id]["supplements"] = sorted(list(supplements))
             #relations[pkg_id]["suggested_by"] = sorted(list(suggested_by))
             relations[pkg_id]["suggested_by"] = []
             relations[pkg_id]["source_name"] = pkg.source_name
@@ -412,6 +423,7 @@ class Analyzer():
                 relations[placeholder_id]["required_by"] = []
                 relations[placeholder_id]["recommended_by"] = []
                 relations[placeholder_id]["suggested_by"] = []
+                relations[placeholder_id]["supplements"] = []
                 relations[placeholder_id]["reponame"] = None
             
             # TODO: triple for loop!!!!
@@ -1027,9 +1039,9 @@ class Analyzer():
 
             # Log progress
             self.workload_queue_counter_current += 1
-            log("[{} of {}]".format(self.workload_queue_counter_current, self.workload_queue_counter_total))
-            log("Analyzing workload: {}".format(workload_id))
-            log("")
+            # log("[{} of {}]".format(self.workload_queue_counter_current, self.workload_queue_counter_total))
+            # log("Analyzing workload: {}".format(workload_id))
+            # log("")
 
             queue_result = multiprocessing.Queue()
             process = multiprocessing.Process(target=self._analyze_workload_process, args=(queue_result, workload_conf, env_conf, repo, arch), daemon=True)
@@ -1267,6 +1279,7 @@ class Analyzer():
         pkg["required_by"] = set()
         pkg["recommended_by"] = set()
         pkg["suggested_by"] = set()
+        pkg["supplements"] = set()
 
         return pkg
 
@@ -1391,6 +1404,7 @@ class Analyzer():
                 view["pkgs"][pkg_id]["required_by"].update(workload["pkg_relations"][pkg_id]["required_by"])
                 view["pkgs"][pkg_id]["recommended_by"].update(workload["pkg_relations"][pkg_id]["recommended_by"])
                 view["pkgs"][pkg_id]["suggested_by"].update(workload["pkg_relations"][pkg_id]["suggested_by"])
+                view["pkgs"][pkg_id]["supplements"].update(workload["pkg_relations"][pkg_id]["supplements"])
 
             # Packages added by this workload (required or dependency)
             for pkg_id in workload["pkg_added_ids"]:
@@ -1417,6 +1431,7 @@ class Analyzer():
                 view["pkgs"][pkg_id]["required_by"].update(workload["pkg_relations"][pkg_id]["required_by"])
                 view["pkgs"][pkg_id]["recommended_by"].update(workload["pkg_relations"][pkg_id]["recommended_by"])
                 view["pkgs"][pkg_id]["suggested_by"].update(workload["pkg_relations"][pkg_id]["suggested_by"])
+                view["pkgs"][pkg_id]["supplements"].update(workload["pkg_relations"][pkg_id]["supplements"])
 
             # And finally the non-existing, imaginary, package placeholders!
             for pkg_id in workload["pkg_placeholder_ids"]:
@@ -2271,6 +2286,7 @@ class Analyzer():
                     view["pkgs"][pkg_id]["required_by"].update(buildroot_srpm["pkg_relations"][pkg_id]["required_by"])
                     view["pkgs"][pkg_id]["recommended_by"].update(buildroot_srpm["pkg_relations"][pkg_id]["recommended_by"])
                     view["pkgs"][pkg_id]["suggested_by"].update(buildroot_srpm["pkg_relations"][pkg_id]["suggested_by"])
+                    view["pkgs"][pkg_id]["supplements"].update(buildroot_srpm["pkg_relations"][pkg_id]["supplements"])
 
                 # Packages needed on top of the base buildroot (required or dependency)
                 for pkg_id in buildroot_srpm["pkg_added_ids"]:
@@ -2302,6 +2318,7 @@ class Analyzer():
                     view["pkgs"][pkg_id]["required_by"].update(buildroot_srpm["pkg_relations"][pkg_id]["required_by"])
                     view["pkgs"][pkg_id]["recommended_by"].update(buildroot_srpm["pkg_relations"][pkg_id]["recommended_by"])
                     view["pkgs"][pkg_id]["suggested_by"].update(buildroot_srpm["pkg_relations"][pkg_id]["suggested_by"])
+                    view["pkgs"][pkg_id]["supplements"].update(buildroot_srpm["pkg_relations"][pkg_id]["supplements"])
             
             # Resetting the SRPMs, so only the new ones can be added
             srpm_ids_to_process = set()
@@ -2422,6 +2439,7 @@ class Analyzer():
     
     def _populate_pkg_or_srpm_relations_fields(self, target_pkg, source_pkg, type = None, view = None):
 
+
         # source_pkg is the arch-specific binary package
         # target_pkg is a representation of that pages for all arches
         #
@@ -2524,14 +2542,17 @@ class Analyzer():
                 if pkg_name not in target_pkg["hard_dependency_of_pkg_names"]:
                     target_pkg["hard_dependency_of_pkg_names"][pkg_name] = set()
                 target_pkg["hard_dependency_of_pkg_names"][pkg_name].add(pkg_nevr)
-
-            # Weak dependency of
+            
+            
+            
+ 
+            
+            # Weak dependency of (who depends on me as a recommended or suggested dep)
             for list_type in ["recommended", "suggested"]:
                 for pkg_id in source_pkg["{}_by".format(list_type)]:
                     pkg_name = pkg_id_to_name(pkg_id)
 
                     # This only happens in addon views, and only rarely.
-                    # (see the long comment above)
                     if pkg_id not in view["pkgs"]:
                         view_conf_id = view["view_conf_id"]
                         view_conf = self.configs["views"][view_conf_id]
@@ -2543,19 +2564,67 @@ class Analyzer():
                         name=pkg["name"],
                         evr=pkg["evr"]
                     )
-                    target_pkg["weak_dependency_of_pkg_nevrs"].add(pkg_nevr)
 
+                    # 
+                    # I also tried getting the reverse weak dependencies based on the weak dependencies
+                    # 
+
+                    # source_pkg_nevr = "{name}-{evr}".format(
+                    #     name=source_pkg["name"],
+                    #     evr=source_pkg["evr"]
+                    # )
+                    # source_pkg_name = source_pkg["name"]
+
+                    target_pkg["weak_dependency_of_pkg_nevrs"].add(pkg_nevr)
                     if pkg_name not in target_pkg["weak_dependency_of_pkg_names"]:
                         target_pkg["weak_dependency_of_pkg_names"][pkg_name] = set()
                     target_pkg["weak_dependency_of_pkg_names"][pkg_name].add(pkg_nevr)
 
+                    # if "reverse_weak_dependency_of_pkg_nevrs" not in pkg:
+                    #     pkg["reverse_weak_dependency_of_pkg_nevrs"] = set()
+                    # if "reverse_weak_dependency_of_pkg_names" not in pkg:
+                    #     pkg["reverse_weak_dependency_of_pkg_names"] = {}
 
-            # Supplements dependency of
-            for pkg_id in source_pkg["supplements"]:
-                pkg_name = pkg_id_to_name(pkg_id)
+                    # pkg["reverse_weak_dependency_of_pkg_nevrs"].add(source_pkg_nevr)
+                    # if source_pkg_name not in pkg["reverse_weak_dependency_of_pkg_names"]:
+                    #     pkg["reverse_weak_dependency_of_pkg_names"][source_pkg_name] = set()
+                    # pkg["reverse_weak_dependency_of_pkg_names"][source_pkg_name].add(source_pkg_nevr)
 
-                # This only happens in addon views, and only rarely.
-                # (see the long comment above)
+
+            #    
+            #    
+            # Supplements: Reverse weak dependencies (dictionary package points to base package)
+            # This is how I would expect it to look but it doesn't.
+            # 
+            # 
+            # for list_type in source_pkg["supplements"]:
+            #     pkg_name = pkg_id_to_name(pkg_id)
+
+            #     # This only happens in addon views, and only rarely.
+            #     # (see the long comment above)
+            #     if pkg_id not in view["pkgs"]:
+            #         view_conf_id = view["view_conf_id"]
+            #         view_conf = self.configs["views"][view_conf_id]
+            #         if view_conf["type"] == "addon":
+            #             continue
+
+            #     pkg = view["pkgs"][pkg_id]
+            #     pkg_nevr = "{name}-{evr}".format(
+            #         name=pkg["name"],
+            #         evr=pkg["evr"]
+            #     )
+            #     target_pkg["reverse_weak_dependency_of_pkg_nevrs"].add(pkg_nevr)
+
+            #     if pkg_name not in target_pkg["reverse_weak_dependency_of_pkg_names"]:
+            #         target_pkg["reverse_weak_dependency_of_pkg_names"][pkg_name] = set()
+            #     target_pkg["reverse_weak_dependency_of_pkg_names"][pkg_name].add(pkg_nevr)
+
+
+            # 
+            # Supplements: Reverse weak dependencies (dictionary package points to base package)
+            # This adds them correctly based on the console but it doesn't print them in the HTML
+            #
+            for pkg_id in source_pkg.get("supplements", []):
                 if pkg_id not in view["pkgs"]:
                     view_conf_id = view["view_conf_id"]
                     view_conf = self.configs["views"][view_conf_id]
@@ -2564,14 +2633,64 @@ class Analyzer():
 
                 pkg = view["pkgs"][pkg_id]
                 pkg_nevr = "{name}-{evr}".format(
-                    name=pkg["name"],
+                    name=pkg["name"], 
                     evr=pkg["evr"]
                 )
-                target_pkg["reverse_weak_dependency_of_pkg_nevrs"].add(pkg_nevr)
+                pkg_name = pkg_id_to_name(pkg_id)
 
-                if pkg_name not in target_pkg["reverse_weak_dependency_of_pkg_names"]:
-                    target_pkg["reverse_weak_dependency_of_pkg_names"][pkg_name] = set()
-                target_pkg["reverse_weak_dependency_of_pkg_names"][pkg_name].add(pkg_nevr)
+                source_pkg_nevr = "{name}-{evr}".format(
+                    name=source_pkg["name"], 
+                    evr=source_pkg["evr"]
+                )
+                source_pkg_name = source_pkg["name"]
+
+                # --- For the supplement (pkg), record a reverse weak dep on source_pkg ---
+                # 1. By NEVR
+                if "reverse_weak_dependency_of_pkg_nevrs" not in pkg:
+                    pkg["reverse_weak_dependency_of_pkg_nevrs"] = set()
+                pkg["reverse_weak_dependency_of_pkg_nevrs"].add(source_pkg_nevr)
+
+                # 2. By NAME
+                if "reverse_weak_dependency_of_pkg_names" not in pkg:
+                    pkg["reverse_weak_dependency_of_pkg_names"] = dict()
+                if source_pkg_name not in pkg["reverse_weak_dependency_of_pkg_names"]:
+                    pkg["reverse_weak_dependency_of_pkg_names"][source_pkg_name] = set()
+                pkg["reverse_weak_dependency_of_pkg_names"][source_pkg_name].add(source_pkg_nevr)
+
+                # If this supplement is also the target_pkg for HTML/combined view, update it
+                if target_pkg["name"] == pkg["name"]:
+                    target_pkg["reverse_weak_dependency_of_pkg_nevrs"].add(source_pkg_nevr)
+                    if source_pkg_name not in target_pkg["reverse_weak_dependency_of_pkg_names"]:
+                        target_pkg["reverse_weak_dependency_of_pkg_names"][source_pkg_name] = set()
+                    target_pkg["reverse_weak_dependency_of_pkg_names"][source_pkg_name].add(source_pkg_nevr)
+
+                # print(f"Added {source_pkg_nevr} to reverse weak dependency of {pkg_nevr}")
+                print(f"{pkg_nevr} reverse_weak_dependency_of_pkg_names: {pkg['reverse_weak_dependency_of_pkg_names']}")
+
+
+                # This is printing the correct list:
+                # For pkg: hunspell-quh
+                #   has reverse weak dep: hunspell ['hunspell-1.7.2-9.eln150']
+                # For pkg: hunspell-quh
+                #   has reverse weak dep: hunspell ['hunspell-1.7.2-9.eln150']
+                # For pkg: hunspell-ro
+                #   has reverse weak dep: hunspell ['hunspell-1.7.2-9.eln150']
+                # For pkg: hunspell-ro
+                #   has reverse weak dep: hunspell ['hunspell-1.7.2-9.eln150']
+                # For pkg: hunspell-ru
+                #   has reverse weak dep: hunspell ['hunspell-1.7.2-9.eln150']
+                # For pkg: hunspell-ru
+                #   has reverse weak dep: hunspell ['hunspell-1.7.2-9.eln150']
+                # For pkg: hunspell-rw
+                #   has reverse weak dep: hunspell ['hunspell-1.7.2-9.eln150']
+                # For pkg: hunspell-rw
+
+
+
+
+
+
+
 
             # All types of dependency
             target_pkg["dependency_of_pkg_nevrs"].update(target_pkg["hard_dependency_of_pkg_nevrs"])
@@ -2590,18 +2709,21 @@ class Analyzer():
                 
                 target_pkg["dependency_of_pkg_names"][pkg_name].update(pkg_nevrs)
 
-                
-            for pkg_name, pkg_nevrs in target_pkg["reverse_weak_dependency_of_pkg_names"].items():
-                if pkg_name not in target_pkg["reverse_weak_dependency_of_pkg_names"]:
-                    target_pkg["reverse_weak_dependency_of_pkg_names"][pkg_name] = set()
-                if pkg_name == "hunspell-en":
-                    print("REACHED")
-                
-                target_pkg["reverse_weak_dependency_of_pkg_names"][pkg_name].update(pkg_nevrs)
 
-            
+            for pkg_name, pkg_nevrs in target_pkg["reverse_weak_dependency_of_pkg_names"].items():
+                if pkg_name not in target_pkg["dependency_of_pkg_names"]:
+                    target_pkg["dependency_of_pkg_names"][pkg_name] = set()
+                
+                target_pkg["dependency_of_pkg_names"][pkg_name].update(pkg_nevrs)
+
+
 
         # TODO: add the levels
+
+
+
+
+
 
 
     def _generate_views_all_arches(self):
@@ -2748,7 +2870,6 @@ class Analyzer():
 
                         self._populate_pkg_or_srpm_relations_fields(view_all_arches[key][identifier], package, type="rpm", view=view)
 
-                    
                     # Source Packages
                     for package in view["source_pkgs"].values():
 
@@ -2787,7 +2908,6 @@ class Analyzer():
                         view_all_arches[key][identifier]["arches"].add(arch)
 
                         self._populate_pkg_or_srpm_relations_fields(view_all_arches[key][identifier], package, type="srpm")
-                    
 
                     # Add binary packages to source packages
                     for pkg_id, pkg in view["pkgs"].items():
@@ -3321,7 +3441,7 @@ class Analyzer():
 
                      
         log("")
-        log("  DONE!")
+        # log("  DONE!")
         log("")
 
 

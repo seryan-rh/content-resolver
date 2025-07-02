@@ -3,22 +3,22 @@ from content_resolver.utils import dump_data, log
 
 
 def _generate_json_file(data, page_name, settings):
-    log("Generating the '{page_name}' JSON file...".format(
-        page_name=page_name
-    ))
+    # log("Generating the '{page_name}' JSON file...".format(
+    #     page_name=page_name
+    # ))
 
     output = settings["output"]
 
     filename = ("{page_name}.json".format(
         page_name=page_name.replace(":", "--")
     ))
-    log("  Writing file...  ({filename})".format(
-        filename=filename
-    ))
+    # log("  Writing file...  ({filename})".format(
+    #     filename=filename
+    # ))
     dump_data(os.path.join(output, filename), data)
     
-    log("  Done!")
-    log("")
+    # log("  Done!")
+    # log("")
 
 
 def _generate_txt_file(data_list, file_name, settings):
@@ -31,9 +31,9 @@ def _generate_txt_file(data_list, file_name, settings):
 
     output = settings["output"]
 
-    log("  Writing file...  ({filename})".format(
-        filename=filename
-    ))
+    # log("  Writing file...  ({filename})".format(
+    #     filename=filename
+    # ))
     with open(os.path.join(output, filename), "w") as file:
         file.write(file_contents)
 
@@ -168,8 +168,8 @@ def _generate_view_lists(query):
             )
             _generate_txt_file(sorted(list(list_content)), file_name, query.settings)
     
-    log("Done!")
-    log("")
+    # log("Done!")
+    # log("")
 
 
 def _generate_env_json_files(query):
@@ -223,8 +223,8 @@ def _generate_env_json_files(query):
             # And save it
             _generate_json_file(output_data, data_name, query.settings)
 
-    log("  Done!")
-    log("")
+    # log("  Done!")
+    # log("")
 
 
 def _generate_workload_json_files(query):
@@ -278,8 +278,8 @@ def _generate_workload_json_files(query):
             # And save it
             _generate_json_file(output_data, data_name, query.settings)
 
-    log("  Done!")
-    log("")
+    # log("  Done!")
+    # log("")
 
 
 def _generate_view_json_files(query):
@@ -383,8 +383,8 @@ def _generate_view_json_files(query):
         _generate_json_file(output_data, data_name, query.settings)
 
 
-    log("  Done!")
-    log("")
+    # log("  Done!")
+    # log("")
 
 
 def _generate_maintainers_json_file(query):
@@ -394,8 +394,8 @@ def _generate_maintainers_json_file(query):
     maintainer_data = query.maintainers()
     _generate_json_file(maintainer_data, "maintainers", query.settings)
 
-    log("  Done!")
-    log("")
+    # log("  Done!")
+    # log("")
 
 
 def generate_data_files(query):
