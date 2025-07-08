@@ -8,6 +8,4 @@ data:
   labels:
   - eln
   repository: repo-eln
-  buildroot_strategy: dep_tracker
-  
-
+  buildroot_strategy: none

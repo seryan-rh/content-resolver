@@ -2543,11 +2543,7 @@ class Analyzer():
                     target_pkg["hard_dependency_of_pkg_names"][pkg_name] = set()
                 target_pkg["hard_dependency_of_pkg_names"][pkg_name].add(pkg_nevr)
             
-            
-            
- 
-            
-            # Weak dependency of (who depends on me as a recommended or suggested dep)
+            # Weak dependency of
             for list_type in ["recommended", "suggested"]:
                 for pkg_id in source_pkg["{}_by".format(list_type)]:
                     pkg_name = pkg_id_to_name(pkg_id)
@@ -2565,66 +2561,22 @@ class Analyzer():
                         evr=pkg["evr"]
                     )
 
-                    # 
-                    # I also tried getting the reverse weak dependencies based on the weak dependencies
-                    # 
 
-                    # source_pkg_nevr = "{name}-{evr}".format(
-                    #     name=source_pkg["name"],
-                    #     evr=source_pkg["evr"]
-                    # )
-                    # source_pkg_name = source_pkg["name"]
 
                     target_pkg["weak_dependency_of_pkg_nevrs"].add(pkg_nevr)
                     if pkg_name not in target_pkg["weak_dependency_of_pkg_names"]:
                         target_pkg["weak_dependency_of_pkg_names"][pkg_name] = set()
                     target_pkg["weak_dependency_of_pkg_names"][pkg_name].add(pkg_nevr)
 
-                    # if "reverse_weak_dependency_of_pkg_nevrs" not in pkg:
-                    #     pkg["reverse_weak_dependency_of_pkg_nevrs"] = set()
-                    # if "reverse_weak_dependency_of_pkg_names" not in pkg:
-                    #     pkg["reverse_weak_dependency_of_pkg_names"] = {}
-
-                    # pkg["reverse_weak_dependency_of_pkg_nevrs"].add(source_pkg_nevr)
-                    # if source_pkg_name not in pkg["reverse_weak_dependency_of_pkg_names"]:
-                    #     pkg["reverse_weak_dependency_of_pkg_names"][source_pkg_name] = set()
-                    # pkg["reverse_weak_dependency_of_pkg_names"][source_pkg_name].add(source_pkg_nevr)
-
-
-            #    
-            #    
-            # Supplements: Reverse weak dependencies (dictionary package points to base package)
-            # This is how I would expect it to look but it doesn't.
-            # 
-            # 
-            # for list_type in source_pkg["supplements"]:
-            #     pkg_name = pkg_id_to_name(pkg_id)
-
-            #     # This only happens in addon views, and only rarely.
-            #     # (see the long comment above)
-            #     if pkg_id not in view["pkgs"]:
-            #         view_conf_id = view["view_conf_id"]
-            #         view_conf = self.configs["views"][view_conf_id]
-            #         if view_conf["type"] == "addon":
-            #             continue
-
-            #     pkg = view["pkgs"][pkg_id]
-            #     pkg_nevr = "{name}-{evr}".format(
-            #         name=pkg["name"],
-            #         evr=pkg["evr"]
-            #     )
-            #     target_pkg["reverse_weak_dependency_of_pkg_nevrs"].add(pkg_nevr)
-
-            #     if pkg_name not in target_pkg["reverse_weak_dependency_of_pkg_names"]:
-            #         target_pkg["reverse_weak_dependency_of_pkg_names"][pkg_name] = set()
-            #     target_pkg["reverse_weak_dependency_of_pkg_names"][pkg_name].add(pkg_nevr)
-
-
-            # 
-            # Supplements: Reverse weak dependencies (dictionary package points to base package)
-            # This adds them correctly based on the console but it doesn't print them in the HTML
-            #
-            for pkg_id in source_pkg.get("supplements", []):
+            # Reverse weak dependencies from supplements
+            if source_pkg["name"].startswith("hunspell-"):
+                print(f"DEBUG: {source_pkg['name']} supplements: {source_pkg['supplements']}")
+            
+            for pkg_id in source_pkg["supplements"]:
+                pkg_name = pkg_id_to_name(pkg_id)
+                
+                # This only happens in addon views, and only rarely.
+                # (see the long comment above)
                 if pkg_id not in view["pkgs"]:
                     view_conf_id = view["view_conf_id"]
                     view_conf = self.configs["views"][view_conf_id]
@@ -2633,92 +2585,64 @@ class Analyzer():
 
                 pkg = view["pkgs"][pkg_id]
                 pkg_nevr = "{name}-{evr}".format(
-                    name=pkg["name"], 
+                    name=pkg["name"],
                     evr=pkg["evr"]
                 )
-                pkg_name = pkg_id_to_name(pkg_id)
-
+                
+                # Add source_pkg as a reverse weak dependency of the supplemented package
                 source_pkg_nevr = "{name}-{evr}".format(
-                    name=source_pkg["name"], 
+                    name=source_pkg["name"],
                     evr=source_pkg["evr"]
                 )
                 source_pkg_name = source_pkg["name"]
-
-                # --- For the supplement (pkg), record a reverse weak dep on source_pkg ---
-                # 1. By NEVR
+                
+                # Set on the arch-specific package
                 if "reverse_weak_dependency_of_pkg_nevrs" not in pkg:
                     pkg["reverse_weak_dependency_of_pkg_nevrs"] = set()
-                pkg["reverse_weak_dependency_of_pkg_nevrs"].add(source_pkg_nevr)
-
-                # 2. By NAME
                 if "reverse_weak_dependency_of_pkg_names" not in pkg:
-                    pkg["reverse_weak_dependency_of_pkg_names"] = dict()
+                    pkg["reverse_weak_dependency_of_pkg_names"] = {}
+                    
+                pkg["reverse_weak_dependency_of_pkg_nevrs"].add(source_pkg_nevr)
                 if source_pkg_name not in pkg["reverse_weak_dependency_of_pkg_names"]:
                     pkg["reverse_weak_dependency_of_pkg_names"][source_pkg_name] = set()
                 pkg["reverse_weak_dependency_of_pkg_names"][source_pkg_name].add(source_pkg_nevr)
 
-                # If this supplement is also the target_pkg for HTML/combined view, update it
-                if target_pkg["name"] == pkg["name"]:
-                    target_pkg["reverse_weak_dependency_of_pkg_nevrs"].add(source_pkg_nevr)
-                    if source_pkg_name not in target_pkg["reverse_weak_dependency_of_pkg_names"]:
-                        target_pkg["reverse_weak_dependency_of_pkg_names"][source_pkg_name] = set()
-                    target_pkg["reverse_weak_dependency_of_pkg_names"][source_pkg_name].add(source_pkg_nevr)
-
-                # print(f"Added {source_pkg_nevr} to reverse weak dependency of {pkg_nevr}")
-                print(f"{pkg_nevr} reverse_weak_dependency_of_pkg_names: {pkg['reverse_weak_dependency_of_pkg_names']}")
-
-
-                # This is printing the correct list:
-                # For pkg: hunspell-quh
-                #   has reverse weak dep: hunspell ['hunspell-1.7.2-9.eln150']
-                # For pkg: hunspell-quh
-                #   has reverse weak dep: hunspell ['hunspell-1.7.2-9.eln150']
-                # For pkg: hunspell-ro
-                #   has reverse weak dep: hunspell ['hunspell-1.7.2-9.eln150']
-                # For pkg: hunspell-ro
-                #   has reverse weak dep: hunspell ['hunspell-1.7.2-9.eln150']
-                # For pkg: hunspell-ru
-                #   has reverse weak dep: hunspell ['hunspell-1.7.2-9.eln150']
-                # For pkg: hunspell-ru
-                #   has reverse weak dep: hunspell ['hunspell-1.7.2-9.eln150']
-                # For pkg: hunspell-rw
-                #   has reverse weak dep: hunspell ['hunspell-1.7.2-9.eln150']
-                # For pkg: hunspell-rw
-
-
-
-
-
-
-
-
-            # All types of dependency
-            target_pkg["dependency_of_pkg_nevrs"].update(target_pkg["hard_dependency_of_pkg_nevrs"])
-            target_pkg["dependency_of_pkg_nevrs"].update(target_pkg["weak_dependency_of_pkg_nevrs"])
-            target_pkg["dependency_of_pkg_nevrs"].update(target_pkg["reverse_weak_dependency_of_pkg_nevrs"])
-
-            for pkg_name, pkg_nevrs in target_pkg["hard_dependency_of_pkg_names"].items():
-                if pkg_name not in target_pkg["dependency_of_pkg_names"]:
-                    target_pkg["dependency_of_pkg_names"][pkg_name] = set()
+            # Transfer any reverse weak dependencies that were set on this source_pkg by other packages
+            if "reverse_weak_dependency_of_pkg_nevrs" in source_pkg:
+                target_pkg["reverse_weak_dependency_of_pkg_nevrs"].update(source_pkg["reverse_weak_dependency_of_pkg_nevrs"])
                 
-                target_pkg["dependency_of_pkg_names"][pkg_name].update(pkg_nevrs)
-
-            for pkg_name, pkg_nevrs in target_pkg["weak_dependency_of_pkg_names"].items():
-                if pkg_name not in target_pkg["dependency_of_pkg_names"]:
-                    target_pkg["dependency_of_pkg_names"][pkg_name] = set()
-                
-                target_pkg["dependency_of_pkg_names"][pkg_name].update(pkg_nevrs)
-
-
-            for pkg_name, pkg_nevrs in target_pkg["reverse_weak_dependency_of_pkg_names"].items():
-                if pkg_name not in target_pkg["dependency_of_pkg_names"]:
-                    target_pkg["dependency_of_pkg_names"][pkg_name] = set()
-                
-                target_pkg["dependency_of_pkg_names"][pkg_name].update(pkg_nevrs)
+            if "reverse_weak_dependency_of_pkg_names" in source_pkg:
+                for dep_name, nevrs in source_pkg["reverse_weak_dependency_of_pkg_names"].items():
+                    if dep_name not in target_pkg["reverse_weak_dependency_of_pkg_names"]:
+                        target_pkg["reverse_weak_dependency_of_pkg_names"][dep_name] = set()
+                    target_pkg["reverse_weak_dependency_of_pkg_names"][dep_name].update(nevrs)
 
 
 
-        # TODO: add the levels
+
+
+
+
+
+            # Unified dependency_of_* sets
+            target_pkg["dependency_of_pkg_nevrs"].update(
+                target_pkg["hard_dependency_of_pkg_nevrs"],
+                target_pkg["weak_dependency_of_pkg_nevrs"],
+                target_pkg["reverse_weak_dependency_of_pkg_nevrs"],
+            )
+
+            for dep_map in (
+                target_pkg["hard_dependency_of_pkg_names"],
+                target_pkg["weak_dependency_of_pkg_names"],
+                target_pkg["reverse_weak_dependency_of_pkg_names"],
+            ):
+                for name, nevrs in dep_map.items():
+                    if name not in target_pkg["dependency_of_pkg_names"]:
+                        target_pkg["dependency_of_pkg_names"][name] = set()
+                    target_pkg["dependency_of_pkg_names"][name].update(nevrs)
+
+
+
 
 
 
