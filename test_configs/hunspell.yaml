@@ -135,6 +135,7 @@ data:
     - hunspell-yi
     - hunspell-zu
     - langpacks-en
+    - langpacks
     - langpacks-en-gb
     - langpacks-en-us
     - langpacks-en-za

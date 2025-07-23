@@ -398,13 +398,19 @@ class Analyzer():
             #    )
             #    suggested_by.add(dep_pkg_id)
 
-            for dep_pkg in dnf_query.filter(supplements=[pkg]):
-                dep_pkg_id = "{name}-{evr}.{arch}".format(
-                    name=dep_pkg.name,
-                    evr=dep_pkg.evr,
-                    arch=dep_pkg.arch
-                )
-                supplements.add(dep_pkg_id)
+            # Find packages that this pkg supplements
+            # For boolean expressions like "(hunspell and langpacks-ru)", we need to find
+            # all packages that satisfy the supplement expression
+            for supplement_reldep in pkg.supplements:
+                # Find packages in the query that provide this supplement
+                providing_pkgs = dnf_query.filter(provides=[supplement_reldep])
+                for providing_pkg in providing_pkgs:
+                    supplement_pkg_id = "{name}-{evr}.{arch}".format(
+                        name=providing_pkg.name,
+                        evr=providing_pkg.evr,
+                        arch=providing_pkg.arch
+                    )
+                    supplements.add(supplement_pkg_id)
             
             relations[pkg_id] = {}
             relations[pkg_id]["required_by"] = sorted(list(required_by))
@@ -2568,10 +2574,7 @@ class Analyzer():
                         target_pkg["weak_dependency_of_pkg_names"][pkg_name] = set()
                     target_pkg["weak_dependency_of_pkg_names"][pkg_name].add(pkg_nevr)
 
-            # Reverse weak dependencies from supplements
-            if source_pkg["name"].startswith("hunspell-"):
-                print(f"DEBUG: {source_pkg['name']} supplements: {source_pkg['supplements']}")
-            
+            # Reverse weak dependencies from supplements            
             for pkg_id in source_pkg["supplements"]:
                 pkg_name = pkg_id_to_name(pkg_id)
                 
@@ -2606,6 +2609,13 @@ class Analyzer():
                 if source_pkg_name not in pkg["reverse_weak_dependency_of_pkg_names"]:
                     pkg["reverse_weak_dependency_of_pkg_names"][source_pkg_name] = set()
                 pkg["reverse_weak_dependency_of_pkg_names"][source_pkg_name].add(source_pkg_nevr)
+                
+                # Also add the supplemented package to source_pkg's reverse weak dependency list
+                # This shows that source_pkg is a reverse weak dependency OF the supplemented package
+                target_pkg["reverse_weak_dependency_of_pkg_nevrs"].add(pkg_nevr)
+                if pkg_name not in target_pkg["reverse_weak_dependency_of_pkg_names"]:
+                    target_pkg["reverse_weak_dependency_of_pkg_names"][pkg_name] = set()
+                target_pkg["reverse_weak_dependency_of_pkg_names"][pkg_name].add(pkg_nevr)
 
             # Transfer any reverse weak dependencies that were set on this source_pkg by other packages
             if "reverse_weak_dependency_of_pkg_nevrs" in source_pkg:
