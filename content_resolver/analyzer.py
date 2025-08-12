@@ -173,6 +173,35 @@ def _get_build_deps_from_a_root_log(root_log):
 
     return required_pkgs
 
+
+def _get_koji_log_path(srpm_id, arch, koji_session):
+    """
+    Get koji log path for a given SRPM.
+    """
+    MAX_TRIES = 10
+    attempts = 0
+
+    while attempts < MAX_TRIES:
+        try:
+            koji_pkg_data = koji_session.getRPM(f"{srpm_id}.src")
+            koji_logs = koji_session.getBuildLogs(koji_pkg_data["build_id"])
+            break
+        except Exception:
+            attempts += 1
+            if attempts == MAX_TRIES:
+                raise KojiRootLogError("Could not talk to Koji API")
+            time.sleep(1)
+
+    koji_log_path = None
+    for koji_log in koji_logs:
+        if koji_log["name"] == "root.log":
+            if koji_log["dir"] == arch or koji_log["dir"] == "noarch":
+                koji_log_path = koji_log["path"]
+                break
+
+    return koji_log_path
+
+
 class Analyzer():
 
     ###############################################################################
@@ -1798,30 +1827,8 @@ class Analyzer():
         
         # Starting for real!
         log("    Talking to Koji API...")
-        # This sometimes hangs, so I'm giving it a timeout and
-        # a few extra tries before totally giving up!
-        MAX_TRIES = 10
-        attempts = 0
-        success = False
-        while attempts < MAX_TRIES:
-            try:
-                koji_pkg_data = koji_session.getRPM("{}.src".format(srpm_id))
-                koji_logs = koji_session.getBuildLogs(koji_pkg_data["build_id"])
-                success = True
-                break
-            except:
-                attempts +=1
-                log("    Error talking to Koji API... retrying...")
-        if not success:
-            raise KojiRootLogError("Could not talk to Koji API")
+        koji_log_path = _get_koji_log_path(srpm_id, arch, koji_session)
 
-        koji_log_path = None
-
-        for koji_log in koji_logs:
-            if koji_log["name"] == "root.log":
-                if koji_log["dir"] == arch or koji_log["dir"] == "noarch":
-                    koji_log_path = koji_log["path"]
-        
         if not koji_log_path:
             return []
 
