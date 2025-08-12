@@ -202,6 +202,25 @@ def _get_koji_log_path(srpm_id, arch, koji_session):
     return koji_log_path
 
 
+def _download_root_log_with_retry(root_log_url):
+    """
+    Download root.log file with retry logic.
+    """
+    MAX_TRIES = 10
+    attempts = 0
+
+    while attempts < MAX_TRIES:
+        try:
+            with urllib.request.urlopen(root_log_url, timeout=20) as response:
+                root_log_data = response.read()
+                return root_log_data.decode('utf-8')
+        except Exception:
+            attempts += 1
+            if attempts == MAX_TRIES:
+                raise KojiRootLogError(f"Could not download root.log from {root_log_url}")
+            time.sleep(1)
+
+
 class Analyzer():
 
     ###############################################################################
@@ -1838,23 +1857,7 @@ class Analyzer():
         )
 
         log("    Downloading the root.log file...")
-        # This sometimes hangs, so I'm giving it a timeout and
-        # a few extra tries before totally giving up!
-        MAX_TRIES = 10
-        attempts = 0
-        success = False
-        while attempts < MAX_TRIES:
-            try:
-                with urllib.request.urlopen(root_log_url, timeout=20) as response:
-                    root_log_data = response.read()
-                    root_log_contents = root_log_data.decode('utf-8')
-                success = True
-                break
-            except:
-                attempts +=1
-                log("    Error getting the root log... retrying...")
-        if not success:
-            raise KojiRootLogError("Could not get a root.log file")
+        root_log_contents = _download_root_log_with_retry(root_log_url)
 
         log("    Parsing the root.log file...")
         directly_required_pkg_names = _get_build_deps_from_a_root_log(root_log_contents)
