@@ -1979,7 +1979,7 @@ class Analyzer():
         log(f"Processing {len(work_items)} SRPMs in parallel (out of {total_srpms_to_resolve} total)")
 
         # Process in parallel using ProcessPoolExecutor
-        max_workers = min(self.settings["max_subprocesses"], len(work_items))
+        max_workers = min(self.settings["parallel_max"], len(work_items))
 
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             # Submit all jobs
