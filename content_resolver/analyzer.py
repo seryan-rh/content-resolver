@@ -1,4 +1,6 @@
 import tempfile, os, json, datetime, dnf, urllib.request, sys, koji
+import re, time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import multiprocessing, asyncio
 from content_resolver.utils import dump_data, load_data, log, err_log, pkg_id_to_name, size, workload_id_to_conf_id, url_to_id
@@ -220,6 +222,92 @@ def _download_root_log_with_retry(root_log_url):
                 raise KojiRootLogError(f"Could not download root.log from {root_log_url}")
             time.sleep(1)
 
+def process_single_srpm_root_log(work_item):
+    """
+    Process a single SRPM's root.log file.
+
+    Args:
+        work_item (dict): Contains koji_api_url, koji_files_url, srpm_id, arch, dev_buildroot
+
+    Returns:
+        dict: Contains srpm_id, arch, deps (list), error (str or None)
+    """
+    try:
+        koji_api_url = work_item['koji_api_url']
+        koji_files_url = work_item['koji_files_url']
+        srpm_id = work_item['srpm_id']
+        arch = work_item['arch']
+        dev_buildroot = work_item.get('dev_buildroot', False)
+
+        # Handle development buildroot mode
+        if dev_buildroot:
+            # Making sure there are 3 passes at least, but that it won't get overwhelmed
+            srpm_name = srpm_id.rsplit("-", 2)[0]
+            if srpm_name in ["bash", "make", "unzip"]:
+                return {
+                    'srpm_id': srpm_id,
+                    'arch': arch,
+                    'deps': ["gawk", "xz", "findutils"],
+                    'error': None
+                }
+            elif srpm_name in ["gawk", "xz", "findutils"]:
+                return {
+                    'srpm_id': srpm_id,
+                    'arch': arch,
+                    'deps': ['cpio', 'diffutils'],
+                    'error': None
+                }
+            return {
+                'srpm_id': srpm_id,
+                'arch': arch,
+                'deps': ["bash", "make", "unzip"],
+                'error': None
+            }
+
+        # Handle special cases
+        if srpm_id.rsplit("-", 2)[0] in ["shim"]:
+            return {
+                'srpm_id': srpm_id,
+                'arch': arch,
+                'deps': [],
+                'error': None
+            }
+
+        # Create koji session
+        koji_session = koji.ClientSession(koji_api_url, opts={"timeout": 20})
+
+        # Get koji log path
+        koji_log_path = _get_koji_log_path(srpm_id, arch, koji_session)
+
+        if not koji_log_path:
+            return {
+                'srpm_id': srpm_id,
+                'arch': arch,
+                'deps': [],
+                'error': None
+            }
+
+        # Download root.log
+        root_log_url = f"{koji_files_url}/{koji_log_path}"
+        root_log_contents = _download_root_log_with_retry(root_log_url)
+
+        # Parse dependencies
+        deps = _get_build_deps_from_a_root_log(root_log_contents)
+
+        return {
+            'srpm_id': srpm_id,
+            'arch': arch,
+            'deps': deps,
+            'error': None
+        }
+
+    except Exception as e:
+        return {
+            'srpm_id': work_item.get('srpm_id', 'unknown'),
+            'arch': work_item.get('arch', 'unknown'),
+            'deps': [],
+            'error': str(e)
+        }
 
 class Analyzer():
 
@@ -1826,65 +1914,15 @@ class Analyzer():
         log("")
 
 
-    def _resolve_srpm_using_root_log(self, srpm_id, arch, koji_session, koji_files_url):
-        
-        # Buildroot grows pretty quickly. Use a fake one for development.
-        if self.settings["dev_buildroot"]:
-            # Making sure there are 3 passes at least, but that it won't get overwhelmed
-            if srpm_id.rsplit("-",2)[0] in ["bash", "make", "unzip"]:
-                return ["gawk", "xz", "findutils"]
-            
-            elif srpm_id.rsplit("-",2)[0] in ["gawk", "xz", "findutils"]:
-                return ['cpio', 'diffutils']
-            
-            return ["bash", "make", "unzip"]
+    def _resolve_srpms_using_root_logs_parallel(self, pass_counter):
+        """
+        This function is idempotent!
+        """
+        log("== Resolving SRPMs using root logs - pass {} (PARALLEL) ========".format(pass_counter))
 
-        # Shim is special.
-        if srpm_id.rsplit("-",2)[0] in ["shim"]:
-            log(    "It's shim! It gets sometiems tagged from wherever... Let's not even bother!")
-            return []
-        
-        # Starting for real!
-        log("    Talking to Koji API...")
-        koji_log_path = _get_koji_log_path(srpm_id, arch, koji_session)
-
-        if not koji_log_path:
-            return []
-
-        root_log_url = "{koji_files_url}/{koji_log_path}".format(
-            koji_files_url=koji_files_url,
-            koji_log_path=koji_log_path
-        )
-
-        log("    Downloading the root.log file...")
-        root_log_contents = _download_root_log_with_retry(root_log_url)
-
-        log("    Parsing the root.log file...")
-        directly_required_pkg_names = _get_build_deps_from_a_root_log(root_log_contents)
-
-        log("    Done!")
-        return directly_required_pkg_names
-
-
-    def _resolve_srpms_using_root_logs(self, pass_counter):
-        # This function is idempotent!
-        # 
-        # That means it can be run many times without affecting the old results.
-
-        log("== Resolving SRPMs using root logs - pass {} ========".format(pass_counter))
-
-        # Prepare a counter for the log
+        # Collect work items (skip cached entries)
+        work_items = []
         total_srpms_to_resolve = 0
-        for koji_id in self.data["buildroot"]["koji_srpms"]:
-            for arch in self.data["buildroot"]["koji_srpms"][koji_id]:
-                total_srpms_to_resolve += len(self.data["buildroot"]["koji_srpms"][koji_id][arch])
-        srpms_to_resolve_counter = 0
-
-        # I need to keep sessions open to Koji
-        # And because in some cases (in mixed repos) packages
-        # could have been in different koji instances, I need
-        # multiple Koji sesions!
-        koji_sessions = {}
 
         for koji_id in self.data["buildroot"]["koji_srpms"]:
             koji_urls = self.data["buildroot"]["koji_urls"][koji_id]
@@ -1895,10 +1933,6 @@ class Analyzer():
             if koji_id not in self.cache["root_log_deps"]["next"]:
                 self.cache["root_log_deps"]["next"][koji_id] = {}
 
-            # Initiate Koji sessions
-            if koji_id not in koji_sessions:
-                koji_sessions[koji_id] = koji.ClientSession(koji_urls["api"], opts = {"timeout": 20})
-
             for arch in self.data["buildroot"]["koji_srpms"][koji_id]:
 
                 # If the cache is empty, initialise it
@@ -1906,40 +1940,106 @@ class Analyzer():
                     self.cache["root_log_deps"]["current"][koji_id][arch] = {}
                 if arch not in self.cache["root_log_deps"]["next"][koji_id]:
                     self.cache["root_log_deps"]["next"][koji_id][arch] = {}
-                
 
                 for srpm_id, srpm in self.data["buildroot"]["koji_srpms"][koji_id][arch].items():
-                    srpms_to_resolve_counter += 1
-                
-                    log("")
-                    log("[ Buildroot - pass {} - {} of {} ]".format(pass_counter, srpms_to_resolve_counter, total_srpms_to_resolve))
-                    log("Koji root_log {srpm_id} {arch}".format(
-                        srpm_id=srpm_id,
-                        arch=arch
-                    ))
-                    if not srpm["directly_required_pkg_names"]:
-                        if srpm_id in self.cache["root_log_deps"]["current"][koji_id][arch]:
-                            log("  Using Cache!")
-                            directly_required_pkg_names = self.cache["root_log_deps"]["current"][koji_id][arch][srpm_id]
+                    total_srpms_to_resolve += 1
 
-                        elif srpm_id in self.cache["root_log_deps"]["next"][koji_id][arch]:
-                            log("  Using Cache!")
-                            directly_required_pkg_names = self.cache["root_log_deps"]["next"][koji_id][arch][srpm_id]
-                        
-                        else:
-                            log("  Resolving...")
-                            directly_required_pkg_names = self._resolve_srpm_using_root_log(srpm_id, arch, koji_sessions[koji_id], koji_urls["files"])
-                        
+                    # Skip if already processed or cached
+                    if srpm["directly_required_pkg_names"]:
+                        log(f"  Skipping {srpm_id} {arch} (already done before)")
+                        continue
+
+                    if srpm_id in self.cache["root_log_deps"]["current"][koji_id][arch]:
+                        log(f"  Using Cache for {srpm_id} {arch}!")
+                        directly_required_pkg_names = self.cache["root_log_deps"]["current"][koji_id][arch][srpm_id]
                         self.cache["root_log_deps"]["next"][koji_id][arch][srpm_id] = directly_required_pkg_names
+                        srpm["directly_required_pkg_names"].update(directly_required_pkg_names)
+                        continue
 
-                        # Here it's important to add the packages to the already initiated
-                        # set, because its reference is shared between the koji_srpms and the srpm sections
-                        self.data["buildroot"]["koji_srpms"][koji_id][arch][srpm_id]["directly_required_pkg_names"].update(directly_required_pkg_names)
+                    if srpm_id in self.cache["root_log_deps"]["next"][koji_id][arch]:
+                        log(f"  Using Cache for {srpm_id} {arch}!")
+                        directly_required_pkg_names = self.cache["root_log_deps"]["next"][koji_id][arch][srpm_id]
+                        srpm["directly_required_pkg_names"].update(directly_required_pkg_names)
+                        continue
+
+                    # Add to work queue
+                    work_items.append({
+                        'koji_id': koji_id,
+                        'koji_api_url': koji_urls["api"],
+                        'koji_files_url': koji_urls["files"],
+                        'srpm_id': srpm_id,
+                        'arch': arch,
+                        'dev_buildroot': self.settings.get("dev_buildroot", False)
+                    })
+
+        if not work_items:
+            log("All SRPMs already cached or processed!")
+            return
+
+        log(f"Processing {len(work_items)} SRPMs in parallel (out of {total_srpms_to_resolve} total)")
+
+        # Process in parallel using ProcessPoolExecutor
+        max_workers = min(self.settings["max_subprocesses"], len(work_items))
+
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all jobs
+            future_to_item = {
+                executor.submit(process_single_srpm_root_log, item): item
+                for item in work_items
+            }
+
+            # Collect results as they complete
+            completed_count = 0
+            total_count = len(work_items)
+
+            for future in as_completed(future_to_item):
+                completed_count += 1
+                work_item = future_to_item[future]
+
+                try:
+                    result = future.result()
+                    self._apply_srpm_result(work_item, result)
+
+                    if result['error']:
+                        log(f"[ Buildroot - pass {pass_counter} - {completed_count} of {total_count} ] "
+                            f"Failed {result['srpm_id']} {result['arch']}: {result['error']}")
                     else:
-                        log("  Skipping! (already done before)")
+                        log(f"[ Buildroot - pass {pass_counter} - {completed_count} of {total_count} ] "
+                            f"Completed {result['srpm_id']} {result['arch']} - found {len(result['deps'])} deps")
+
+                except Exception as e:
+                    log(f"Failed to process {work_item['srpm_id']}: {e}")
+                    # Apply empty result for failed processing
+                    error_result = {
+                        'srpm_id': work_item['srpm_id'],
+                        'arch': work_item['arch'],
+                        'deps': [],
+                        'error': str(e)
+                    }
+                    self._apply_srpm_result(work_item, error_result)
+
+        # Save updated cache
+        dump_data(self.settings["root_log_deps_cache_path"], self.cache["root_log_deps"]["next"])
+
         log("")
         log("  DONE!")
         log("")
+
+
+    def _apply_srpm_result(self, work_item, result):
+        """Apply worker result back to main data structures"""
+        koji_id = work_item['koji_id']
+        arch = work_item['arch']
+        srpm_id = work_item['srpm_id']
+        deps = result['deps']
+
+        # Update cache
+        self.cache["root_log_deps"]["next"][koji_id][arch][srpm_id] = deps
+
+        # Update main data
+        # Here it's important to add the packages to the already initiated
+        # set, because its reference is shared between the koji_srpms and the srpm sections
+        self.data["buildroot"]["koji_srpms"][koji_id][arch][srpm_id]["directly_required_pkg_names"].update(deps)
 
 
     def _analyze_build_groups(self):
@@ -2207,7 +2307,7 @@ class Analyzer():
             # ... which also updates:
             #   data["buildroot"]["srpms"]...
             # ... because it's interlinked.
-            self._resolve_srpms_using_root_logs(pass_counter)
+            self._resolve_srpms_using_root_logs_parallel(pass_counter)
 
             self._record_metric("    finished _resolve_srpms_using_root_logs")
 
