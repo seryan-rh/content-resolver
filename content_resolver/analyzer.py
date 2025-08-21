@@ -398,8 +398,6 @@ class Analyzer():
             #    suggested_by.add(dep_pkg_id)
 
             # Find packages that this pkg supplements
-            # For boolean expressions like "(hunspell and langpacks-ru)", we need to find
-            # all packages that satisfy the supplement expression
             for supplement_reldep in pkg.supplements:
                 # Find packages in the query that provide this supplement
                 providing_pkgs = dnf_query.filter(provides=[supplement_reldep])
