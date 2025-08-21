@@ -6,9 +6,9 @@ from content_resolver.utils import dump_data, log
 
 
 def _generate_html_page(template_name, template_data, page_name, settings):
-    # log("Generating the '{page_name}' page...".format(
-    #     page_name=page_name
-    # ))
+    log("Generating the '{page_name}' page...".format(
+        page_name=page_name
+    ))
 
     output = settings["output"]
 
@@ -28,14 +28,14 @@ def _generate_html_page(template_name, template_data, page_name, settings):
         page_name=page_name.replace(":", "--")
     ))
 
-    # log("  Writing file...  ({filename})".format(
-    #     filename=filename
-    # ))
+    log("  Writing file...  ({filename})".format(
+        filename=filename
+    ))
     with open(os.path.join(output, filename), "w") as file:
         file.write(page)
     
-    # log("  Done!")
-    # log("")
+    log("  Done!")
+    log("")
 
 
 def _generate_workload_pages(query):
@@ -170,8 +170,8 @@ def _generate_workload_pages(query):
 
                 _generate_html_page("workload_cmp_envs", template_data, page_name, query.settings)
     
-    # log("  Done!")
-    # log("")
+    log("  Done!")
+    log("")
 
 
 def _generate_env_pages(query):
@@ -256,8 +256,8 @@ def _generate_env_pages(query):
 
             _generate_html_page("env_cmp_arches", template_data, page_name, query.settings)
 
-    # log("  Done!")
-    # log("")
+    log("  Done!")
+    log("")
 
 
 def _generate_maintainer_pages(query):
@@ -282,8 +282,8 @@ def _generate_maintainer_pages(query):
         )
         _generate_html_page("maintainer_workloads", template_data, page_name, query.settings)
 
-    # log("  Done!")
-    # log("")
+    log("  Done!")
+    log("")
 
 
 def _generate_config_pages(query):
@@ -365,8 +365,8 @@ def _generate_config_pages(query):
         )
         _generate_html_page("config_unwanted", template_data, page_name, query.settings)
 
-    # log("  Done!")
-    # log("")
+    log("  Done!")
+    log("")
 
 
 def _generate_repo_pages(query):
@@ -386,8 +386,8 @@ def _generate_repo_pages(query):
             _generate_html_page("repo", template_data, page_name, query.settings)
 
 
-    # log("  Done!")
-    # log("")
+    log("  Done!")
+    log("")
 
 
 def _generate_view_pages(query):
@@ -514,8 +514,8 @@ def _dump_all_data(query):
     file_path = os.path.join(query.settings["output"], file_name)
     dump_data(file_path, data)
 
-    # log("  Done!")
-    # log("")
+    log("  Done!")
+    log("")
 
 
 def generate_pages(query):
@@ -540,8 +540,8 @@ def generate_pages(query):
     src_static_dir = os.path.join("templates", "_static")
     output_static_dir = os.path.join(query.settings["output"])
     subprocess.run(["cp", "-R", src_static_dir, output_static_dir])
-    # log("  Done!")
-    # log("")
+    log("  Done!")
+    log("")
 
     # Generate the landing page
     _generate_html_page("homepage", None, "index", query.settings)

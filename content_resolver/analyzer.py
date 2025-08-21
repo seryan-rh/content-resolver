@@ -1,5 +1,4 @@
 import tempfile, os, json, datetime, dnf, urllib.request, sys, koji
-import time
 
 import multiprocessing, asyncio
 from content_resolver.utils import dump_data, load_data, log, err_log, pkg_id_to_name, size, workload_id_to_conf_id, url_to_id
@@ -1045,9 +1044,9 @@ class Analyzer():
 
             # Log progress
             self.workload_queue_counter_current += 1
-            # log("[{} of {}]".format(self.workload_queue_counter_current, self.workload_queue_counter_total))
-            # log("Analyzing workload: {}".format(workload_id))
-            # log("")
+            log("[{} of {}]".format(self.workload_queue_counter_current, self.workload_queue_counter_total))
+            log("Analyzing workload: {}".format(workload_id))
+            log("")
 
             queue_result = multiprocessing.Queue()
             process = multiprocessing.Process(target=self._analyze_workload_process, args=(queue_result, workload_conf, env_conf, repo, arch), daemon=True)
@@ -3339,7 +3338,7 @@ class Analyzer():
 
                      
         log("")
-        # log("  DONE!")
+        log("  DONE!")
         log("")
 
 
