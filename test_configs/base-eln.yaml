@@ -46,7 +46,6 @@ data:
   - fedora-repos-eln
   - fedora-release-eln
 
-
   # Labels connect things together.
   # Workloads get installed in environments with the same label.
   # They also get included in views with the same label.
