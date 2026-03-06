@@ -24,75 +24,66 @@ class Query():
         return "%.1f %s%s" % (num, 'T', suffix)
         
 
+    def _build_workload_index(self):
+        if hasattr(self, '_workload_index'):
+            return
+        self._workload_index = {}
+        workloads_dict = self.data["workloads"]
+        for workload_id in workloads_dict:
+            parts = workload_id.split(":")
+            if len(parts) == 4:
+                wc, ec, ri, ar = parts
+                self._workload_index.setdefault(wc, {}).setdefault(ec, {}).setdefault(ri, set()).add(ar)
+
     @lru_cache(maxsize = None)
     def workloads(self, workload_conf_id, env_conf_id, repo_id, arch, list_all=False, output_change=None):
-        # accepts none in any argument, and in those cases, answers for all instances
-
-        # It can output just one part of the id.
-        # That's useful to, for example, list all arches associated with a workload_conf_id
         if output_change:
             list_all = True
             if output_change not in ["workload_conf_ids", "env_conf_ids", "repo_ids", "arches"]:
                 raise ValueError('output_change must be one of: "workload_conf_ids", "env_conf_ids", "repo_ids", "arches"')
 
+        self._build_workload_index()
+
         matching_ids = set()
+        workloads_dict = self.data["workloads"]
 
-        # list considered workload_conf_ids
-        if workload_conf_id:
-            workload_conf_ids = [workload_conf_id]
-        else:
-            workload_conf_ids = self.configs["workloads"].keys()
+        wc_ids = [workload_conf_id] if workload_conf_id else list(self._workload_index.keys())
 
-        # list considered env_conf_ids
-        if env_conf_id:
-            env_conf_ids = [env_conf_id]
-        else:
-            env_conf_ids = self.configs["envs"].keys()
-        
-        # list considered repo_ids
-        if repo_id:
-            repo_ids = [repo_id]
-        else:
-            repo_ids = self.configs["repos"].keys()
-            
-        # list considered arches
-        if arch:
-            arches = [arch]
-        else:
-            arches = self.settings["allowed_arches"]
-        
-        # And now try looping through all of that, and return True on a first occurance
-        # This is a terrible amount of loops. But most cases will have just one item
-        # in most of those, anyway. No one is expected to run this method with
-        # a "None" for every argument!
-        for workload_conf_id in workload_conf_ids:
-            for env_conf_id in env_conf_ids:
-                for repo_id in repo_ids:
-                    for arch in arches:
-                        workload_id = "{workload_conf_id}:{env_conf_id}:{repo_id}:{arch}".format(
-                            workload_conf_id=workload_conf_id,
-                            env_conf_id=env_conf_id,
-                            repo_id=repo_id,
-                            arch=arch
-                        )
-                        if workload_id in self.data["workloads"].keys():
-                            if not list_all:
-                                return True
-                            if output_change:
-                                if output_change == "workload_conf_ids":
-                                    matching_ids.add(workload_conf_id)
-                                if output_change == "env_conf_ids":
-                                    matching_ids.add(env_conf_id)
-                                if output_change == "repo_ids":
-                                    matching_ids.add(repo_id)
-                                if output_change == "arches":
-                                    matching_ids.add(arch)
-                            else:
-                                matching_ids.add(workload_id)
-        
+        for wc in wc_ids:
+            if wc not in self._workload_index:
+                continue
+            ec_map = self._workload_index[wc]
+            ec_ids = [env_conf_id] if env_conf_id else list(ec_map.keys())
+            for ec in ec_ids:
+                if ec not in ec_map:
+                    continue
+                ri_map = ec_map[ec]
+                ri_ids = [repo_id] if repo_id else list(ri_map.keys())
+                for ri in ri_ids:
+                    if ri not in ri_map:
+                        continue
+                    arch_set = ri_map[ri]
+                    ar_ids = [arch] if arch else list(arch_set)
+                    for ar in ar_ids:
+                        if ar not in arch_set:
+                            continue
+                        if not list_all:
+                            return True
+                        if output_change:
+                            if output_change == "workload_conf_ids":
+                                matching_ids.add(wc)
+                            elif output_change == "env_conf_ids":
+                                matching_ids.add(ec)
+                            elif output_change == "repo_ids":
+                                matching_ids.add(ri)
+                            elif output_change == "arches":
+                                matching_ids.add(ar)
+                        else:
+                            matching_ids.add(f"{wc}:{ec}:{ri}:{ar}")
+
         if not list_all:
             return False
-        return sorted(list(matching_ids))
+        return sorted(matching_ids)
     
     @lru_cache(maxsize = None)
     def workloads_id(self, id, list_all=False, output_change=None):
@@ -116,66 +107,57 @@ class Query():
         
         raise ValueError("That seems to be an invalid ID!")
 
+    def _build_env_index(self):
+        if hasattr(self, '_env_index'):
+            return
+        self._env_index = {}
+        for env_id in self.data["envs"]:
+            parts = env_id.split(":")
+            if len(parts) == 3:
+                ec, ri, ar = parts
+                self._env_index.setdefault(ec, {}).setdefault(ri, set()).add(ar)
+
     @lru_cache(maxsize = None)
     def envs(self, env_conf_id, repo_id, arch, list_all=False, output_change=None):
-        # accepts none in any argument, and in those cases, answers for all instances
-
-        # It can output just one part of the id.
-        # That's useful to, for example, list all arches associated with a workload_conf_id
         if output_change:
             list_all = True
             if output_change not in ["env_conf_ids", "repo_ids", "arches"]:
                 raise ValueError('output_change must be one of: "env_conf_ids", "repo_ids", "arches"')
-        
+
+        self._build_env_index()
+
         matching_ids = set()
 
-        # list considered env_conf_ids
-        if env_conf_id:
-            env_conf_ids = [env_conf_id]
-        else:
-            env_conf_ids = self.configs["envs"].keys()
-        
-        # list considered repo_ids
-        if repo_id:
-            repo_ids = [repo_id]
-        else:
-            repo_ids = self.configs["repos"].keys()
-            
-        # list considered arches
-        if arch:
-            arches = [arch]
-        else:
-            arches = self.settings["allowed_arches"]
-        
-        # And now try looping through all of that, and return True on a first occurance
-        # This is a terrible amount of loops. But most cases will have just one item
-        # in most of those, anyway. No one is expected to run this method with
-        # a "None" for every argument!
-        for env_conf_id in env_conf_ids:
-            for repo_id in repo_ids:
-                for arch in arches:
-                    env_id = "{env_conf_id}:{repo_id}:{arch}".format(
-                        env_conf_id=env_conf_id,
-                        repo_id=repo_id,
-                        arch=arch
-                    )
-                    if env_id in self.data["envs"].keys():
-                        if not list_all:
-                            return True
-                        if output_change:
-                            if output_change == "env_conf_ids":
-                                matching_ids.add(env_conf_id)
-                            if output_change == "repo_ids":
-                                matching_ids.add(repo_id)
-                            if output_change == "arches":
-                                matching_ids.add(arch)
-                        else:
-                            matching_ids.add(env_id)
-        
-        # This means nothing has been found!
+        ec_ids = [env_conf_id] if env_conf_id else list(self._env_index.keys())
+
+        for ec in ec_ids:
+            if ec not in self._env_index:
+                continue
+            ri_map = self._env_index[ec]
+            ri_ids = [repo_id] if repo_id else list(ri_map.keys())
+            for ri in ri_ids:
+                if ri not in ri_map:
+                    continue
+                arch_set = ri_map[ri]
+                ar_ids = [arch] if arch else list(arch_set)
+                for ar in ar_ids:
+                    if ar not in arch_set:
+                        continue
+                    if not list_all:
+                        return True
+                    if output_change:
+                        if output_change == "env_conf_ids":
+                            matching_ids.add(ec)
+                        elif output_change == "repo_ids":
+                            matching_ids.add(ri)
+                        elif output_change == "arches":
+                            matching_ids.add(ar)
+                    else:
+                        matching_ids.add(f"{ec}:{ri}:{ar}")
+
         if not list_all:
             return False
-        return sorted(list(matching_ids))
+        return sorted(matching_ids)
     
     @lru_cache(maxsize = None)
     def envs_id(self, id, list_all=False, output_change=None):
@@ -948,17 +930,23 @@ class Query():
         return True
     
 
-    def _srpm_name_to_rpm_names(self, srpm_name, repo_id):
-        all_pkgs_by_arch = self.data["pkgs"][repo_id]
-
-        pkg_names = set()
-
-        for arch, pkgs in all_pkgs_by_arch.items():
+    def _build_srpm_to_rpm_index(self, repo_id):
+        if not hasattr(self, '_srpm_to_rpm_cache'):
+            self._srpm_to_rpm_cache = {}
+        if repo_id in self._srpm_to_rpm_cache:
+            return
+        index = {}
+        for arch, pkgs in self.data["pkgs"][repo_id].items():
             for pkg_id, pkg in pkgs.items():
-                if pkg["source_name"] == srpm_name:
-                    pkg_names.add(pkg["name"])
+                sn = pkg["source_name"]
+                if sn not in index:
+                    index[sn] = set()
+                index[sn].add(pkg["name"])
+        self._srpm_to_rpm_cache[repo_id] = index
 
-        return pkg_names
+    def _srpm_name_to_rpm_names(self, srpm_name, repo_id):
+        self._build_srpm_to_rpm_index(repo_id)
+        return self._srpm_to_rpm_cache[repo_id].get(srpm_name, set())
 
     
     @lru_cache(maxsize = None)

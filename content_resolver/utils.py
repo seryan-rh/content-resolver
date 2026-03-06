@@ -24,16 +24,22 @@ def log(msg):
 
 
 def err_log(msg):
-    print("ERROR LOG:  {}".format(msg), file=sys.stderr)
+    print(f"ERROR LOG:  {msg}", file=sys.stderr)
+
+_pkg_id_name_cache = {}
 
 def pkg_id_to_name(pkg_id):
-    pkg_name = pkg_id.rsplit("-",2)[0]
-    return pkg_name
+    cached = _pkg_id_name_cache.get(pkg_id)
+    if cached is not None:
+        return cached
+    name = pkg_id.rsplit("-", 2)[0]
+    _pkg_id_name_cache[pkg_id] = name
+    return name
 
 
 def dump_data(path, data):
     with open(path, 'w') as file:
-        json.dump(data, file, cls=SetEncoder)
+        json.dump(data, file, cls=SetEncoder, check_circular=False)
 
 
 def size(num, suffix='B'):

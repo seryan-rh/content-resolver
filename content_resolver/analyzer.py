@@ -1,5 +1,5 @@
 import tempfile, os, json, datetime, dnf, urllib.request, sys, koji
-import re, time
+import re, time, hashlib, gzip
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import multiprocessing, asyncio
@@ -37,8 +37,6 @@ def _get_build_deps_from_a_root_log(root_log):
         # parts of the log I don't really care about
         if state == 0:
 
-            # The next installation is the build deps!
-            # So I start caring. Next state!
             if "'builddep', '--installroot'" in file_line:
                 state += 1
 
@@ -47,19 +45,14 @@ def _get_build_deps_from_a_root_log(root_log):
         # getting the "already installed" packages to the list
         elif state == 1:
 
-            # "Package already installed" indicates it's directly required,
-            # so save it.
-            # DNF5 does this after "Repositories loaded" and quotes the NVR;
-            # DNF4 does this before "Dependencies resolved" without the quotes.
             if "is already installed." in file_line:
-                pkg_name = file_line.split()[3].strip('"').rsplit("-",2)[0]
+                parts = file_line.split()
+                pkg_name = parts[3].strip('"').rsplit("-",2)[0]
                 required_pkgs.append(pkg_name)
 
-            # That's all! Next state! (DNF4)
             elif "Dependencies resolved." in file_line:
                 state += 1
 
-            # That's all! Next state! (DNF5)
             elif "Repositories loaded." in file_line:
                 state += 1
 
@@ -68,21 +61,16 @@ def _get_build_deps_from_a_root_log(root_log):
         # going through the log right before the first package name
         elif state == 2:
 
-            # "Package already installed" indicates it's directly required,
-            # so save it.
-            # DNF4 does this before "Dependencies resolved" without the quotes;
-            # DNF5 does this after "Repositories loaded" and quotes the NVR, but
-            # sometimes prints this in the middle of a dependency line.
             if "is already installed." in file_line:
-                pkg_index = file_line.split().index("already") - 2
-                pkg_name = file_line.split()[pkg_index].strip('"').rsplit("-",2)[0]
+                parts = file_line.split()
+                pkg_index = parts.index("already") - 2
+                pkg_name = parts[pkg_index].strip('"').rsplit("-",2)[0]
                 required_pkgs.append(pkg_name)
 
-            # The next line will be the first package. Next state!
-            # DNF5 reports "Installing: ## packages" in the Transaction Summary,
-            # which we need to ignore
-            if "Installing:" in file_line and len(file_line.split()) == 3:
-                state += 1
+            if "Installing:" in file_line:
+                parts = file_line.split()
+                if len(parts) == 3:
+                    state += 1
 
 
         # 3/
@@ -96,71 +84,36 @@ def _get_build_deps_from_a_root_log(root_log):
             elif "Transaction Summary" in file_line:
                 state = 2
 
-            # Sometimes DNF5 prints "Package ... is already installed" in middle of the output.
-            elif file_line.split()[2] == "Package" and file_line.split()[-1] == "installed.":
-                pkg_name = file_line.split()[3].strip('"').rsplit("-",2)[0]
-                required_pkgs.append(pkg_name)
-
             else:
-                # I need to deal with the following thing...
-                #
-                # DEBUG util.py:446:   gobject-introspection-devel     aarch64 1.70.0-1.fc36              build 1.1 M
-                # DEBUG util.py:446:   graphene-devel                  aarch64 1.10.6-3.fc35              build 159 k
-                # DEBUG util.py:446:   gstreamer1-plugins-bad-free-devel
-                # DEBUG util.py:446:                                   aarch64 1.19.2-1.fc36              build 244 k
-                # DEBUG util.py:446:   json-glib-devel                 aarch64 1.6.6-1.fc36               build 173 k
-                # DEBUG util.py:446:   libXcomposite-devel             aarch64 0.4.5-6.fc35               build  16 k
-                #
-                # The "gstreamer1-plugins-bad-free-devel" package name is too long to fit in the column,
-                # so it gets split on two lines.
-                #
-                # Which if I take the usual file_line.split()[2] I get the correct name,
-                # but the next line gives me "aarch64" as a package name which is wrong.
-                #
-                # So the usual line has file_line.split() == 8
-                # The one with the long package name has file_line.split() == 3
-                # and the one following it has file_line.split() == 7
-                #
-                # One more thing... long release!
-                #
-                # DEBUG util.py:446:   qrencode-devel               aarch64 4.0.2-8.fc35                  build  13 k
-                # DEBUG util.py:446:   systemtap-sdt-devel          aarch64 4.6~pre16291338gf2c14776-1.fc36
-                # DEBUG util.py:446:                                                                      build  71 k
-                # DEBUG util.py:446:   tpm2-tss-devel               aarch64 3.1.0-4.fc36                  build 315 k
-                #
-                # So the good one here is file_line.split() == 5.
-                # And the following is also file_line.split() == 5. Fun!
-                #
-                # So if it ends with B, k, M, G it's the wrong line, so skip, otherwise take the package name.
-                #
-                # I can also anticipate both get long... that would mean I need to skip file_line.split() == 4.
+                parts = file_line.split()
+                num_parts = len(parts)
 
-                if len(file_line.split()) == 10 or len(file_line.split()) == 11:
-                    # Sometimes DNF5 prints "Package ... is already installed" in the middle of a line
-                    pkg_index = file_line.split().index("already") - 2
-                    pkg_name = file_line.split()[pkg_index].strip('"').rsplit("-",2)[0]
+                if num_parts >= 3 and parts[2] == "Package" and parts[-1] == "installed.":
+                    pkg_name = parts[3].strip('"').rsplit("-",2)[0]
+                    required_pkgs.append(pkg_name)
+
+                elif num_parts in (10, 11):
+                    pkg_index = parts.index("already") - 2
+                    pkg_name = parts[pkg_index].strip('"').rsplit("-",2)[0]
                     required_pkgs.append(pkg_name)
                     if pkg_index == 3:
-                        pkg_name = file_line.split()[7]
+                        pkg_name = parts[7]
                     else:
-                        pkg_name = file_line.split()[2]
+                        pkg_name = parts[2]
                     required_pkgs.append(pkg_name)
 
-                # TODO: len(file_line.split()) == 9 ??
-
-                elif len(file_line.split()) == 8 or len(file_line.split()) == 3:
-                    pkg_name = file_line.split()[2]
+                elif num_parts in (8, 3):
+                    pkg_name = parts[2]
                     required_pkgs.append(pkg_name)
 
-                elif len(file_line.split()) == 7 or len(file_line.split()) == 4:
+                elif num_parts in (7, 4):
                     continue
 
-                elif len(file_line.split()) == 6 or len(file_line.split()) == 5:
-                    # DNF5 uses B/KiB/MiB/GiB, DNF4 uses B/k/M/G
-                    if file_line.split()[4] in ["B", "KiB", "k", "MiB", "M", "GiB", "G"]:
+                elif num_parts in (6, 5):
+                    if parts[4] in ("B", "KiB", "k", "MiB", "M", "GiB", "G"):
                         continue
                     else:
-                        pkg_name = file_line.split()[2]
+                        pkg_name = parts[2]
                         required_pkgs.append(pkg_name)
 
                 else:
@@ -369,6 +322,18 @@ class Analyzer():
         # Saves more than an hour.
         self._global_performance_hack_run_recommends_queries = True
 
+        # Incremental cache: stores workload results keyed by input hash,
+        # so unchanged workloads can be skipped on subsequent runs.
+        self._repo_fingerprints = {}
+        self._cache_hits = 0
+        self._cache_misses = 0
+        self._incremental_cache_enabled = not settings.get("no_incremental_cache", False)
+        self._incremental_cache = {"version": 2, "workloads": {}, "envs": {}}
+        if self._incremental_cache_enabled:
+            self._load_incremental_cache()
+        else:
+            log("  Incremental cache disabled (--no-incremental-cache)")
+
         try:
             self.cache["root_log_deps"]["current"] = load_data(self.settings["root_log_deps_cache_path"])
         except FileNotFoundError:
@@ -456,7 +421,165 @@ class Analyzer():
             self.global_dnf_repo_cache[repo_id][arch] = []
             for repo in base.repos.iter_enabled():
                 self.global_dnf_repo_cache[repo_id][arch].append(repo)
-    
+
+
+    ###########################################################################
+    ### Incremental cache #####################################################
+    ###########################################################################
+
+    _INCREMENTAL_CACHE_VERSION = 2
+    _INCREMENTAL_CACHE_PATH = "cache_incremental.json.gz"
+
+    def _load_incremental_cache(self):
+        try:
+            with gzip.open(self._INCREMENTAL_CACHE_PATH, 'rt', encoding='utf-8') as f:
+                cache = json.load(f)
+            if cache.get("version") == self._INCREMENTAL_CACHE_VERSION:
+                self._incremental_cache = cache
+                wl_count = len(cache.get("workloads", {}))
+                env_count = len(cache.get("envs", {}))
+                log(f"  Loaded incremental cache: {wl_count} workloads, {env_count} envs")
+            else:
+                log("  Incremental cache version mismatch — starting fresh")
+        except FileNotFoundError:
+            log("  No incremental cache found — will build one after this run")
+        except (json.JSONDecodeError, OSError) as e:
+            log(f"  Could not load incremental cache ({e}) — starting fresh")
+
+    def _save_incremental_cache(self):
+        if not self._incremental_cache_enabled:
+            return
+        self._incremental_cache["version"] = self._INCREMENTAL_CACHE_VERSION
+        self._incremental_cache["repo_fingerprints"] = self._repo_fingerprints
+        try:
+            with gzip.open(self._INCREMENTAL_CACHE_PATH, 'wt', encoding='utf-8') as f:
+                json.dump(self._incremental_cache, f, check_circular=False)
+            wl_count = len(self._incremental_cache.get("workloads", {}))
+            log(f"  Saved incremental cache ({wl_count} workloads)")
+        except (PermissionError, OSError) as e:
+            log(f"  Warning: Could not save incremental cache: {e}")
+
+    def _compute_repo_fingerprints(self):
+        self._repo_fingerprints = {}
+        for repo_id in self.data["pkgs"]:
+            for arch in self.data["pkgs"][repo_id]:
+                pkg_ids = sorted(self.data["pkgs"][repo_id][arch].keys())
+                fp = hashlib.sha256("\n".join(pkg_ids).encode()).hexdigest()[:16]
+                self._repo_fingerprints[f"{repo_id}:{arch}"] = fp
+        log(f"  Computed repo fingerprints for {len(self._repo_fingerprints)} repo+arch combos")
+
+        old_fps = self._incremental_cache.get("repo_fingerprints", {})
+        changed = [k for k in self._repo_fingerprints if self._repo_fingerprints[k] != old_fps.get(k)]
+        if changed:
+            log(f"  Repo changes detected in: {', '.join(changed)} — affected workloads will be re-analyzed")
+        else:
+            log("  No repo changes detected — cached workloads are valid")
+
+    @staticmethod
+    def _make_hashable(obj):
+        if isinstance(obj, set):
+            return sorted(str(x) for x in obj)
+        if isinstance(obj, dict):
+            return {k: Analyzer._make_hashable(v) for k, v in sorted(obj.items())}
+        if isinstance(obj, (list, tuple)):
+            return [Analyzer._make_hashable(x) for x in obj]
+        return obj
+
+    def _workload_cache_key(self, workload_conf, env_conf, repo_id, arch):
+        key_data = json.dumps({
+            "wc": self._make_hashable(workload_conf),
+            "ec": self._make_hashable(env_conf),
+            "rf": self._repo_fingerprints.get(f"{repo_id}:{arch}", ""),
+            "a": arch,
+        }, sort_keys=True, default=str)
+        return hashlib.sha256(key_data.encode()).hexdigest()
+
+    def _env_cache_key(self, env_conf, repo_id, arch):
+        key_data = json.dumps({
+            "ec": self._make_hashable(env_conf),
+            "rf": self._repo_fingerprints.get(f"{repo_id}:{arch}", ""),
+            "a": arch,
+        }, sort_keys=True, default=str)
+        return hashlib.sha256(key_data.encode()).hexdigest()
+
+    def _get_cached_workload(self, workload_id, cache_key):
+        if not self._incremental_cache_enabled:
+            return None
+        cached = self._incremental_cache.get("workloads", {}).get(workload_id)
+        if cached and cached.get("key") == cache_key:
+            self._cache_hits += 1
+            return cached["result"]
+        self._cache_misses += 1
+        return None
+
+    def _put_cached_workload(self, workload_id, cache_key, result):
+        if not self._incremental_cache_enabled:
+            return
+        self._incremental_cache.setdefault("workloads", {})[workload_id] = {
+            "key": cache_key,
+            "result": result,
+        }
+
+    def _get_cached_env(self, env_id, cache_key):
+        if not self._incremental_cache_enabled:
+            return None
+        cached = self._incremental_cache.get("envs", {}).get(env_id)
+        if cached and cached.get("key") == cache_key:
+            return cached["result"]
+        return None
+
+    def _put_cached_env(self, env_id, cache_key, result):
+        if not self._incremental_cache_enabled:
+            return
+        self._incremental_cache.setdefault("envs", {})[env_id] = {
+            "key": cache_key,
+            "result": result,
+        }
+
+    def _pre_check_workload_cache(self):
+        """Determine which envs have all their workloads cached.
+        
+        Returns a dict mapping env_id -> bool (True if all workloads cached).
+        This allows skipping env analysis for envs where no fresh workload
+        analysis is needed.
+        """
+        if not self._incremental_cache_enabled:
+            log("  Incremental cache disabled — all envs will be analyzed")
+            return {}
+
+        workload_env_map = {}
+        for workload_conf_id, workload_conf in self.configs["workloads"].items():
+            workload_env_map[workload_conf_id] = set()
+            for label in workload_conf["labels"]:
+                for env_conf_id, env_conf in self.configs["envs"].items():
+                    if label in env_conf["labels"]:
+                        workload_env_map[workload_conf_id].add(env_conf_id)
+
+        env_all_cached = {}
+        for workload_conf_id, workload_conf in self.configs["workloads"].items():
+            for env_conf_id in workload_env_map[workload_conf_id]:
+                env_conf = self.configs["envs"][env_conf_id]
+                for repo_id in env_conf["repositories"]:
+                    repo = self.configs["repos"][repo_id]
+                    for arch in repo["source"]["architectures"]:
+                        env_id = f"{env_conf_id}:{repo_id}:{arch}"
+                        workload_id = f"{workload_conf_id}:{env_conf_id}:{repo_id}:{arch}"
+                        cache_key = self._workload_cache_key(workload_conf, env_conf, repo_id, arch)
+                        is_cached = self._get_cached_workload(workload_id, cache_key) is not None
+                        if env_id not in env_all_cached:
+                            env_all_cached[env_id] = True
+                        if not is_cached:
+                            env_all_cached[env_id] = False
+
+        # Reset counters since _get_cached_workload modified them during the pre-check
+        self._cache_hits = 0
+        self._cache_misses = 0
+
+        cached_count = sum(1 for v in env_all_cached.values() if v)
+        total_count = len(env_all_cached)
+        log(f"  Pre-check: {cached_count}/{total_count} envs have all workloads cached")
+        return env_all_cached
+
 
     def _analyze_pkgs(self, repo, arch):
         log("Analyzing pkgs for {repo_name} ({repo_id}) {arch}".format(
@@ -470,6 +593,7 @@ class Analyzer():
             base.conf.debuglevel = 0
             base.conf.errorlevel = 0
             base.conf.logfilelevel = 0
+            base.conf.metadata_expire = -1
 
             # Local DNF cache
             cachedir_name = "dnf_cachedir-{repo}-{arch}".format(
@@ -551,71 +675,37 @@ class Analyzer():
             # DNF query
             query = base.sack.query
 
-            # Get all packages
-            all_pkgs_set = set(query())
-            pkgs = {}
-            for pkg_object in all_pkgs_set:
-                pkg_nevra = "{name}-{evr}.{arch}".format(
-                    name=pkg_object.name,
-                    evr=pkg_object.evr,
-                    arch=pkg_object.arch
-                )
-                pkg_nevr = "{name}-{evr}".format(
-                    name=pkg_object.name,
-                    evr=pkg_object.evr
-                )
-                pkg = {}
-                pkg["id"] = pkg_nevra
-                pkg["name"] = pkg_object.name
-                pkg["evr"] = pkg_object.evr
-                pkg["nevr"] = pkg_nevr
-                pkg["arch"] = pkg_object.arch
-                pkg["installsize"] = pkg_object.installsize
-                pkg["description"] = pkg_object.description
-                #pkg["provides"] = pkg_object.provides
-                #pkg["requires"] = pkg_object.requires
-                #pkg["recommends"] = pkg_object.recommends
-                #pkg["suggests"] = pkg_object.suggests
-                pkg["summary"] = pkg_object.summary
-                pkg["source_name"] = pkg_object.source_name
-                pkg["sourcerpm"] = pkg_object.sourcerpm
-                pkg["reponame"] = pkg_object.reponame
-
-                pkgs[pkg_nevra] = pkg
-            
-            # There shouldn't be multiple packages of the same NVR
-            # But the world isn't as simple! So add all reponames
-            # to every package, in case it's in multiple repos
-
             repo_priorities = {}
             for repo_name, repo_data in repo["source"]["repos"].items():
                 repo_priorities[repo_name] = repo_data["priority"]
 
+            all_pkgs_set = set(query())
+            pkgs = {}
             for pkg_object in all_pkgs_set:
-                pkg_nevra = "{name}-{evr}.{arch}".format(
-                    name=pkg_object.name,
-                    evr=pkg_object.evr,
-                    arch=pkg_object.arch
-                )
+                pkg_nevra = f"{pkg_object.name}-{pkg_object.evr}.{pkg_object.arch}"
                 reponame = pkg_object.reponame
 
-                if "all_reponames" not in pkgs[pkg_nevra]:
-                    pkgs[pkg_nevra]["all_reponames"] = set()
-                
+                if pkg_nevra not in pkgs:
+                    pkgs[pkg_nevra] = {
+                        "id": pkg_nevra,
+                        "name": pkg_object.name,
+                        "evr": pkg_object.evr,
+                        "nevr": f"{pkg_object.name}-{pkg_object.evr}",
+                        "arch": pkg_object.arch,
+                        "installsize": pkg_object.installsize,
+                        "description": pkg_object.description,
+                        "summary": pkg_object.summary,
+                        "source_name": pkg_object.source_name,
+                        "sourcerpm": pkg_object.sourcerpm,
+                        "reponame": reponame,
+                        "all_reponames": set(),
+                    }
                 pkgs[pkg_nevra]["all_reponames"].add(reponame)
-            
+
             for pkg_nevra, pkg in pkgs.items():
-                pkgs[pkg_nevra]["highest_priority_reponames"] = set()
-
-                all_repo_priorities = set()
-                for reponame in pkg["all_reponames"]:
-                    all_repo_priorities.add(repo_priorities[reponame])
-                
-                highest_repo_priority = sorted(list(all_repo_priorities))[0]
-
-                for reponame in pkg["all_reponames"]:
-                    if repo_priorities[reponame] == highest_repo_priority:
-                        pkgs[pkg_nevra]["highest_priority_reponames"].add(reponame)
+                all_reponames = pkg["all_reponames"]
+                best_priority = min(repo_priorities[rn] for rn in all_reponames)
+                pkg["highest_priority_reponames"] = {rn for rn in all_reponames if repo_priorities[rn] == best_priority}
 
             log("  Done!  ({pkg_count} packages in total)".format(
                 pkg_count=len(pkgs)
@@ -660,85 +750,79 @@ class Analyzer():
 
     def _analyze_package_relations(self, dnf_query, package_placeholders = None):
         relations = {}
+        run_recommends = self._global_performance_hack_run_recommends_queries
 
+        pkg_objects = {}
         for pkg in dnf_query:
-            pkg_id = "{name}-{evr}.{arch}".format(
-                name=pkg.name,
-                evr=pkg.evr,
-                arch=pkg.arch
-            )
-            
-            required_by = set()
-            recommended_by = set()
-            suggested_by = set()
-            supplements = set()
+            pkg_id = f"{pkg.name}-{pkg.evr}.{pkg.arch}"
+            pkg_objects[pkg_id] = pkg
+            relations[pkg_id] = {
+                "required_by": set(),
+                "recommended_by": set(),
+                "supplements": set(),
+                "suggested_by": [],
+                "source_name": pkg.source_name,
+                "reponame": pkg.reponame,
+            }
 
-            for dep_pkg in dnf_query.filter(requires=[pkg]):
-                dep_pkg_id = "{name}-{evr}.{arch}".format(
-                    name=dep_pkg.name,
-                    evr=dep_pkg.evr,
-                    arch=dep_pkg.arch
-                )
-                required_by.add(dep_pkg_id)
+        # Cache filter(provides=[reldep]) results so each unique reldep
+        # is resolved only once. Many packages share the same requires
+        # (glibc, python3-libs, etc.), so this avoids thousands of
+        # redundant libsolv lookups.
+        provides_cache = {}
 
-            if self._global_performance_hack_run_recommends_queries:
-                for dep_pkg in dnf_query.filter(recommends=[pkg]):
-                    dep_pkg_id = "{name}-{evr}.{arch}".format(
-                        name=dep_pkg.name,
-                        evr=dep_pkg.evr,
-                        arch=dep_pkg.arch
-                    )
-                    recommended_by.add(dep_pkg_id)
-            
-            #for dep_pkg in dnf_query.filter(suggests=[pkg]):
-            #    dep_pkg_id = "{name}-{evr}.{arch}".format(
-            #        name=dep_pkg.name,
-            #        evr=dep_pkg.evr,
-            #        arch=dep_pkg.arch
-            #    )
-            #    suggested_by.add(dep_pkg_id)
+        def _get_provider_ids(reldep):
+            key = str(reldep)
+            if key not in provides_cache:
+                result = set()
+                for prov_pkg in dnf_query.filter(provides=[reldep]):
+                    result.add(f"{prov_pkg.name}-{prov_pkg.evr}.{prov_pkg.arch}")
+                provides_cache[key] = result
+            return provides_cache[key]
 
-            # Find packages that this pkg supplements
+        for pkg_id, pkg in pkg_objects.items():
+            for req in pkg.requires:
+                for provider_id in _get_provider_ids(req):
+                    if provider_id in relations and provider_id != pkg_id:
+                        relations[provider_id]["required_by"].add(pkg_id)
+
+        if run_recommends:
+            for pkg_id, pkg in pkg_objects.items():
+                for rec in pkg.recommends:
+                    for provider_id in _get_provider_ids(rec):
+                        if provider_id in relations and provider_id != pkg_id:
+                            relations[provider_id]["recommended_by"].add(pkg_id)
+
+        for pkg_id, pkg in pkg_objects.items():
             for supplement_reldep in pkg.supplements:
-                # Find packages in the query that provide this supplement
-                providing_pkgs = dnf_query.filter(provides=[supplement_reldep])
-                for providing_pkg in providing_pkgs:
-                    supplement_pkg_id = "{name}-{evr}.{arch}".format(
-                        name=providing_pkg.name,
-                        evr=providing_pkg.evr,
-                        arch=providing_pkg.arch
-                    )
-                    supplements.add(supplement_pkg_id)
-            
-            relations[pkg_id] = {}
-            relations[pkg_id]["required_by"] = sorted(list(required_by))
-            relations[pkg_id]["recommended_by"] = sorted(list(recommended_by))
-            relations[pkg_id]["supplements"] = sorted(list(supplements))
-            #relations[pkg_id]["suggested_by"] = sorted(list(suggested_by))
-            relations[pkg_id]["suggested_by"] = []
-            relations[pkg_id]["source_name"] = pkg.source_name
-            relations[pkg_id]["reponame"] = pkg.reponame
-        
-        if package_placeholders:
-            for placeholder_name,placeholder_data in package_placeholders.items():
-                placeholder_id = pkg_placeholder_name_to_id(placeholder_name)
+                for provider_id in _get_provider_ids(supplement_reldep):
+                    if provider_id in relations:
+                        relations[pkg_id]["supplements"].add(provider_id)
 
-                relations[placeholder_id] = {}
-                relations[placeholder_id]["required_by"] = []
-                relations[placeholder_id]["recommended_by"] = []
-                relations[placeholder_id]["suggested_by"] = []
-                relations[placeholder_id]["supplements"] = []
-                relations[placeholder_id]["reponame"] = None
-            
-            # TODO: triple for loop!!!!
-            for placeholder_name,placeholder_data in package_placeholders.items():
+        for pkg_id, rel in relations.items():
+            rel["required_by"] = sorted(rel["required_by"])
+            rel["recommended_by"] = sorted(rel["recommended_by"])
+            rel["supplements"] = sorted(rel["supplements"])
+
+        if package_placeholders:
+            name_to_ids = {}
+            for pkg_id in relations:
+                pname = pkg_id.rsplit("-", 2)[0]
+                name_to_ids.setdefault(pname, []).append(pkg_id)
+
+            for placeholder_name, placeholder_data in package_placeholders.items():
                 placeholder_id = pkg_placeholder_name_to_id(placeholder_name)
-                for placeholder_dependency_name in placeholder_data["requires"]:
-                    for pkg_id in relations:
-                        pkg_name = pkg_id_to_name(pkg_id)
-                        if pkg_name == placeholder_dependency_name:
-                            relations[pkg_id]["required_by"].append(placeholder_id)
-        
+                relations[placeholder_id] = {
+                    "required_by": [], "recommended_by": [],
+                    "suggested_by": [], "supplements": [], "reponame": None,
+                }
+
+            for placeholder_name, placeholder_data in package_placeholders.items():
+                placeholder_id = pkg_placeholder_name_to_id(placeholder_name)
+                for dep_name in placeholder_data["requires"]:
+                    for pkg_id in name_to_ids.get(dep_name, []):
+                        relations[pkg_id]["required_by"].append(placeholder_id)
+
         return relations
 
 
@@ -789,6 +873,7 @@ class Analyzer():
             base.conf.debuglevel = 0
             base.conf.errorlevel = 0
             base.conf.logfilelevel = 0
+            base.conf.metadata_expire = -1
 
             # Local DNF cache
             cachedir_name = "dnf_cachedir-{repo}-{arch}".format(
@@ -946,36 +1031,36 @@ class Analyzer():
         return env
 
 
-    def _analyze_envs(self):
+    def _analyze_envs(self, env_all_cached=None):
         envs = {}
 
-        # Look at all env configs...
+        env_tasks = []
         for env_conf_id, env_conf in self.configs["envs"].items():
-            # For each of those, look at all repos it lists...
             for repo_id in env_conf["repositories"]:
-                # And for each of the repo, look at all arches it supports.
                 repo = self.configs["repos"][repo_id]
                 for arch in repo["source"]["architectures"]:
-                    # Now it has
-                    #    all env confs *
-                    #    repos each config lists *
-                    #    archeas each repo supports
-                    # Analyze all of that!
-                    log("Analyzing {env_name} ({env_id}) from {repo_name} ({repo}) {arch}...".format(
-                        env_name=env_conf["name"],
-                        env_id=env_conf_id,
-                        repo_name=repo["name"],
-                        repo=repo_id,
-                        arch=arch
-                    ))
+                    env_id = f"{env_conf_id}:{repo_id}:{arch}"
+                    env_tasks.append((env_id, env_conf, repo, arch))
 
-                    env_id = "{env_conf_id}:{repo_id}:{arch}".format(
-                        env_conf_id=env_conf_id,
-                        repo_id=repo_id,
-                        arch=arch
-                    )
-                    envs[env_id] = self._analyze_env(env_conf, repo, arch)
-                    
+        cached_count = 0
+        for env_id, env_conf, repo, arch in env_tasks:
+            cache_key = self._env_cache_key(env_conf, repo["id"], arch)
+            all_wl_cached = env_all_cached.get(env_id, False) if env_all_cached else False
+
+            if all_wl_cached:
+                cached_env = self._get_cached_env(env_id, cache_key)
+                if cached_env is not None:
+                    envs[env_id] = cached_env
+                    cached_count += 1
+                    continue
+
+            log(f"Analyzing {env_conf['name']} ({env_conf['id']}) from {repo['name']} ({repo['id']}) {arch}...")
+            envs[env_id] = self._analyze_env(env_conf, repo, arch)
+            self._put_cached_env(env_id, cache_key, envs[env_id])
+
+        if cached_count:
+            log(f"  Skipped {cached_count} envs (all their workloads are cached)")
+
         self.data["envs"] = envs
 
 
@@ -986,10 +1071,12 @@ class Analyzer():
         workload["env_conf_id"] = env_conf["id"]
         workload["repo_id"] = repo["id"]
         workload["arch"] = arch
+        workload["labels"] = list(set(workload_conf["labels"]) & set(env_conf["labels"]))
 
         workload["pkg_env_ids"] = []
         workload["pkg_added_ids"] = []
         workload["pkg_placeholder_ids"] = []
+        workload["srpm_placeholder_names"] = []
 
         workload["pkg_relations"] = []
 
@@ -997,6 +1084,11 @@ class Analyzer():
         workload["errors"]["non_existing_pkgs"] = []
         workload["succeeded"] = False
         workload["env_succeeded"] = False
+
+        workload["warnings"] = {}
+        workload["warnings"]["non_existing_pkgs"] = []
+        workload["warnings"]["non_existing_placeholder_deps"] = []
+        workload["warnings"]["message"] = None
 
         workload["errors"]["message"] = """
         Failed to analyze this workload because of an error while analyzing the environment.
@@ -1045,6 +1137,7 @@ class Analyzer():
             base.conf.debuglevel = 0
             base.conf.errorlevel = 0
             base.conf.logfilelevel = 0
+            base.conf.metadata_expire = -1
 
             # Local DNF cache
             cachedir_name = "dnf_cachedir-{repo}-{arch}".format(
@@ -1333,6 +1426,14 @@ class Analyzer():
                 arch=arch
             )
 
+            # Check incremental cache
+            cache_key = self._workload_cache_key(workload_conf, env_conf, repo["id"], arch)
+            cached_result = self._get_cached_workload(workload_id, cache_key)
+            if cached_result is not None:
+                self.workload_queue_counter_current += 1
+                results[workload_id] = cached_result
+                continue
+
             # Max processes
             while True:
                 if self.current_subprocesses < self.settings["max_subprocesses"]:
@@ -1350,11 +1451,6 @@ class Analyzer():
             queue_result = multiprocessing.Queue()
             process = multiprocessing.Process(target=self._analyze_workload_process, args=(queue_result, workload_conf, env_conf, repo, arch), daemon=True)
             process.start()
-
-            # Now wait a bit for the result.
-            # This is a terrible way to implement an async way to
-            # wait for the result with a 222 seconds timeout.
-            # But it works. If anyone knows how to make it nicer, let me know! :D
 
             # 2 seconds
             for _ in range(1, 20):
@@ -1379,7 +1475,6 @@ class Analyzer():
 
             self.current_subprocesses -= 1
 
-            # This basically means there was an exception in the processing and the process crashed
             if queue_result.empty():
                 log("")
                 log("")
@@ -1401,11 +1496,15 @@ class Analyzer():
                 sys.exit(1)
         
             workload = queue_result.get()
-            
             results[workload_id] = workload
+
+            # Store in incremental cache
+            self._put_cached_workload(workload_id, cache_key, workload)
 
 
     async def _analyze_workloads_async(self, results):
+
+        hits_before = self._cache_hits
 
         tasks = []
 
@@ -1418,6 +1517,16 @@ class Analyzer():
         
         for task in tasks:
             await task
+
+        batch_hits = self._cache_hits - hits_before
+        if batch_hits:
+            log(f"  ({batch_hits} workloads loaded from incremental cache)")
+
+        # Periodically save cache after each batch of workloads so partial runs
+        # still build the cache (the final save at end of analyze_things covers
+        # the complete state).
+        if self._incremental_cache_enabled and self._cache_misses > 0:
+            self._save_incremental_cache()
 
         log("DONE!")
 
@@ -1469,17 +1578,6 @@ class Analyzer():
                         # And save those.
                         workload_env_map[workload_conf_id].add(env_conf_id)
         
-        # And now, look at all workload configs...
-        for workload_conf_id, workload_conf in self.configs["workloads"].items():
-            # ... and for each, look at all env configs it should be analyzed in.
-            for env_conf_id in workload_env_map[workload_conf_id]:
-                # Each of those envs can have multiple repos associated...
-                env_conf = self.configs["envs"][env_conf_id]
-                for repo_id in env_conf["repositories"]:
-                    # ... and each repo probably has multiple architecture.
-                    repo = self.configs["repos"][repo_id]
-                    arches = repo["source"]["architectures"]
-
         # And now, look at all workload configs...
         for workload_conf_id, workload_conf in self.configs["workloads"].items():
             # ... and for each, look at all env configs it should be analyzed in.
@@ -1684,58 +1782,46 @@ class Analyzer():
             workload_conf_id = workload["workload_conf_id"]
             workload_conf = self.configs["workloads"][workload_conf_id]
 
-            # Packages in the environment
+            view_pkgs = view["pkgs"]
+            repo_pkgs = self.data["pkgs"][repo_id][arch]
+            wl_relations = workload["pkg_relations"]
+            wl_packages = workload_conf["packages"]
+            wl_arch_packages = workload_conf["arch_packages"][arch]
+
             for pkg_id in workload["pkg_env_ids"]:
+                if pkg_id not in view_pkgs:
+                    view_pkgs[pkg_id] = self._init_view_pkg(repo_pkgs[pkg_id], arch)
 
-                # Initialise
-                if pkg_id not in view["pkgs"]:
-                    pkg = self.data["pkgs"][repo_id][arch][pkg_id]
-                    view["pkgs"][pkg_id] = self._init_view_pkg(pkg, arch)
-                
-                # It's in this wokrload
-                view["pkgs"][pkg_id]["in_workload_ids_all"].add(workload_id)
+                vp = view_pkgs[pkg_id]
+                vp["in_workload_ids_all"].add(workload_id)
+                vp["in_workload_ids_env"].add(workload_id)
 
-                # And in the environment
-                view["pkgs"][pkg_id]["in_workload_ids_env"].add(workload_id)
+                if vp["name"] in wl_packages or vp["name"] in wl_arch_packages:
+                    vp["in_workload_ids_req"].add(workload_id)
 
-                # Is it also required?
-                if view["pkgs"][pkg_id]["name"] in workload_conf["packages"]:
-                    view["pkgs"][pkg_id]["in_workload_ids_req"].add(workload_id)
-                elif view["pkgs"][pkg_id]["name"] in workload_conf["arch_packages"][arch]:
-                    view["pkgs"][pkg_id]["in_workload_ids_req"].add(workload_id)
-                
-                # pkg_relations
-                view["pkgs"][pkg_id]["required_by"].update(workload["pkg_relations"][pkg_id]["required_by"])
-                view["pkgs"][pkg_id]["recommended_by"].update(workload["pkg_relations"][pkg_id]["recommended_by"])
-                view["pkgs"][pkg_id]["suggested_by"].update(workload["pkg_relations"][pkg_id]["suggested_by"])
-                view["pkgs"][pkg_id]["supplements"].update(workload["pkg_relations"][pkg_id]["supplements"])
+                rel = wl_relations[pkg_id]
+                vp["required_by"].update(rel["required_by"])
+                vp["recommended_by"].update(rel["recommended_by"])
+                vp["suggested_by"].update(rel["suggested_by"])
+                vp["supplements"].update(rel["supplements"])
 
-            # Packages added by this workload (required or dependency)
             for pkg_id in workload["pkg_added_ids"]:
+                if pkg_id not in view_pkgs:
+                    view_pkgs[pkg_id] = self._init_view_pkg(repo_pkgs[pkg_id], arch)
 
-                # Initialise
-                if pkg_id not in view["pkgs"]:
-                    pkg = self.data["pkgs"][repo_id][arch][pkg_id]
-                    view["pkgs"][pkg_id] = self._init_view_pkg(pkg, arch)
-                
-                # It's in this wokrload
-                view["pkgs"][pkg_id]["in_workload_ids_all"].add(workload_id)
+                vp = view_pkgs[pkg_id]
+                vp["in_workload_ids_all"].add(workload_id)
 
-                # Is it required?
-                if view["pkgs"][pkg_id]["name"] in workload_conf["packages"]:
-                    view["pkgs"][pkg_id]["in_workload_ids_req"].add(workload_id)
-                elif view["pkgs"][pkg_id]["name"] in workload_conf["arch_packages"][arch]:
-                    view["pkgs"][pkg_id]["in_workload_ids_req"].add(workload_id)
-                
-                # Or a dependency?
+                if vp["name"] in wl_packages or vp["name"] in wl_arch_packages:
+                    vp["in_workload_ids_req"].add(workload_id)
                 else:
-                    view["pkgs"][pkg_id]["in_workload_ids_dep"].add(workload_id)
-                
-                # pkg_relations
-                view["pkgs"][pkg_id]["required_by"].update(workload["pkg_relations"][pkg_id]["required_by"])
-                view["pkgs"][pkg_id]["recommended_by"].update(workload["pkg_relations"][pkg_id]["recommended_by"])
-                view["pkgs"][pkg_id]["suggested_by"].update(workload["pkg_relations"][pkg_id]["suggested_by"])
-                view["pkgs"][pkg_id]["supplements"].update(workload["pkg_relations"][pkg_id]["supplements"])
+                    vp["in_workload_ids_dep"].add(workload_id)
+
+                rel = wl_relations[pkg_id]
+                vp["required_by"].update(rel["required_by"])
+                vp["recommended_by"].update(rel["recommended_by"])
+                vp["suggested_by"].update(rel["suggested_by"])
+                vp["supplements"].update(rel["supplements"])
 
             # And finally the non-existing, imaginary, package placeholders!
             for pkg_id in workload["pkg_placeholder_ids"]:
@@ -2563,40 +2649,42 @@ class Analyzer():
             target_pkg["weak_dependency_of_pkg_names"] = {} # if set() of nevrs
             target_pkg["reverse_weak_dependency_of_pkg_names"] = {} # if set() of nevrs
     
-    def _populate_pkg_or_srpm_relations_fields(self, target_pkg, source_pkg, type = None, view = None):
+    _RELATION_LIST_TYPES = ["all", "req", "dep", "env"]
+    _WORKLOAD_ID_KEYS = ["in_workload_ids_all", "in_workload_ids_req", "in_workload_ids_dep", "in_workload_ids_env"]
+    _WORKLOAD_CONF_KEYS = ["in_workload_conf_ids_all", "in_workload_conf_ids_req", "in_workload_conf_ids_dep", "in_workload_conf_ids_env"]
+    _BUILDROOT_ID_KEYS = ["in_buildroot_of_srpm_id_all", "in_buildroot_of_srpm_id_req", "in_buildroot_of_srpm_id_dep", "in_buildroot_of_srpm_id_env"]
+    _BUILDROOT_NAME_KEYS = ["in_buildroot_of_srpm_name_all", "in_buildroot_of_srpm_name_req", "in_buildroot_of_srpm_name_dep", "in_buildroot_of_srpm_name_env"]
 
-        # source_pkg is the arch-specific binary package
-        # target_pkg is a representation of that pages for all arches
-        #
-        # This function adds information from the arch-specific package to the general one.
-        # It gets called for all the arches.
-        #
+    def _populate_pkg_or_srpm_relations_fields(self, target_pkg, source_pkg, type = None, view = None):
 
         if type == "rpm" and not view:
             raise ValueError("This function requires a view when using type = 'rpm'!")
 
-        # Unwanted
         target_pkg["unwanted_completely_in_list_ids"].update(source_pkg["unwanted_completely_in_list_ids"])
         target_pkg["unwanted_buildroot_in_list_ids"].update(source_pkg["unwanted_buildroot_in_list_ids"])
 
+        for i in range(4):
+            wid_key = self._WORKLOAD_ID_KEYS[i]
+            wcid_key = self._WORKLOAD_CONF_KEYS[i]
+            bid_key = self._BUILDROOT_ID_KEYS[i]
+            bname_key = self._BUILDROOT_NAME_KEYS[i]
 
-        # Dependency relationships
-        for list_type in ["all", "req", "dep", "env"]:
-            target_pkg["in_workload_ids_{}".format(list_type)].update(source_pkg["in_workload_ids_{}".format(list_type)])
+            src_wids = source_pkg[wid_key]
+            target_pkg[wid_key].update(src_wids)
 
-            target_pkg["in_buildroot_of_srpm_id_{}".format(list_type)].update(source_pkg["in_buildroot_of_srpm_id_{}".format(list_type)])
+            src_bids = source_pkg[bid_key]
+            target_pkg[bid_key].update(src_bids)
 
-            for workload_id in source_pkg["in_workload_ids_{}".format(list_type)]:
-                workload_conf_id = workload_id_to_conf_id(workload_id)
-                target_pkg["in_workload_conf_ids_{}".format(list_type)].add(workload_conf_id)
+            target_wcids = target_pkg[wcid_key]
+            for workload_id in src_wids:
+                target_wcids.add(workload_id.split(":")[0])
 
-            for srpm_id in source_pkg["in_buildroot_of_srpm_id_{}".format(list_type)]:
-                srpm_name = pkg_id_to_name(srpm_id)
-
-                if srpm_name not in target_pkg["in_buildroot_of_srpm_name_{}".format(list_type)]:
-                    target_pkg["in_buildroot_of_srpm_name_{}".format(list_type)][srpm_name] = set()
-                
-                target_pkg["in_buildroot_of_srpm_name_{}".format(list_type)][srpm_name].add(srpm_id)
+            target_bnames = target_pkg[bname_key]
+            for srpm_id in src_bids:
+                srpm_name = srpm_id.rsplit("-", 2)[0]
+                if srpm_name not in target_bnames:
+                    target_bnames[srpm_name] = set()
+                target_bnames[srpm_name].add(srpm_id)
         
         # Level number
         level_number = 0
@@ -3142,322 +3230,180 @@ class Analyzer():
             this_level_srpms = set()
             previous_level_srpms = set()
 
-            # Take all explicitly required packages and assign them
-            # to the maintainer of their workloads.
-            #
-            # Or of this is the buildroot levels, 
-            for pkg_name, pkg in view_all_arches["pkgs_by_name"].items():
-                source_name = pkg["source_name"]
+            pkgs_by_name = view_all_arches["pkgs_by_name"]
+            source_pkgs_by_name = view_all_arches["source_pkgs_by_name"]
+            workloads_data = self.data["workloads"]
+            workloads_configs = self.configs["workloads"]
 
-                # Only want explicitly required ones
+            for pkg_name, pkg in pkgs_by_name.items():
+                pkg_rec = pkg["maintainer_recommendation"]
+                pkg_rec_details = pkg["maintainer_recommendation_details"]
+
                 for workload_id in pkg["in_workload_ids_req"]:
-                    workload = self.data["workloads"][workload_id]
+                    workload = workloads_data[workload_id]
                     workload_conf_id = workload["workload_conf_id"]
-                    workload_conf = self.configs["workloads"][workload_conf_id]
+                    workload_maintainer = workloads_configs[workload_conf_id]["maintainer"]
 
-                    workload_maintainer = workload_conf["maintainer"]
+                    if workload_maintainer not in pkg_rec:
+                        pkg_rec[workload_maintainer] = set()
+                    pkg_rec[workload_maintainer].add(score)
 
-                    # 1/  maintainer_recommendation
+                    level_details = pkg_rec_details.setdefault(level, {})
+                    sublevel_details = level_details.setdefault(sublevel, {})
+                    if workload_maintainer not in sublevel_details:
+                        sublevel_details[workload_maintainer] = {"reasons": set(), "locations": set()}
+                    sublevel_details[workload_maintainer]["locations"].add(workload_conf_id)
 
-                    if workload_maintainer not in pkg["maintainer_recommendation"]:
-                        #pkg["maintainer_recommendation"][workload_maintainer] = set()
-                        self.data["views_all_arches"][view_conf_id]["pkgs_by_name"][pkg_name]["maintainer_recommendation"][workload_maintainer] = set()
-                    
-                    #pkg["maintainer_recommendation"][workload_maintainer].add(score)
-                    self.data["views_all_arches"][view_conf_id]["pkgs_by_name"][pkg_name]["maintainer_recommendation"][workload_maintainer].add(score)
-
-                    # 2/  maintainer_recommendation_details
-
-                    if level not in pkg["maintainer_recommendation_details"]:
-                        #pkg["maintainer_recommendation_details"][level] = {}
-                        self.data["views_all_arches"][view_conf_id]["pkgs_by_name"][pkg_name]["maintainer_recommendation_details"][level] = {}
-                    
-                    if sublevel not in pkg["maintainer_recommendation_details"][level]:
-                        #pkg["maintainer_recommendation_details"][level][sublevel] = {}
-                        self.data["views_all_arches"][view_conf_id]["pkgs_by_name"][pkg_name]["maintainer_recommendation_details"][level][sublevel] = {}
-                    
-                    if workload_maintainer not in pkg["maintainer_recommendation_details"][level][sublevel]:
-                        #pkg["maintainer_recommendation_details"][level][sublevel][workload_maintainer] = {}
-                        #pkg["maintainer_recommendation_details"][level][sublevel][workload_maintainer]["reasons"] = {}
-                        #pkg["maintainer_recommendation_details"][level][sublevel][workload_maintainer]["locations"] = {}
-                        self.data["views_all_arches"][view_conf_id]["pkgs_by_name"][pkg_name]["maintainer_recommendation_details"][level][sublevel][workload_maintainer] = {}
-                        self.data["views_all_arches"][view_conf_id]["pkgs_by_name"][pkg_name]["maintainer_recommendation_details"][level][sublevel][workload_maintainer]["reasons"] = set()
-                        self.data["views_all_arches"][view_conf_id]["pkgs_by_name"][pkg_name]["maintainer_recommendation_details"][level][sublevel][workload_maintainer]["locations"] = set()
-
-                    #pkg["maintainer_recommendation_details"][level][sublevel][workload_maintainer]["locations"].add(workload_conf_id)
-                    self.data["views_all_arches"][view_conf_id]["pkgs_by_name"][pkg_name]["maintainer_recommendation_details"][level][sublevel][workload_maintainer]["locations"].add(workload_conf_id)
-
-            # Lie to the while loop so it runs at least once
             level_changes_made = True
             level_change_detection = set()
 
-
             while level_changes_made:
 
-                # Level 1 and higher
                 if int(level) > 0:
-
                     level_changes_made = False
-
                     log("    {}".format(score))
 
-                    # Take all the direct build dependencies
-                    # of the previous group, and assign them to the maintainers of packages
-                    # that pulled them in
-                    for pkg_name, pkg in view_all_arches["pkgs_by_name"].items():
-                        source_name = pkg["source_name"]
-
-                        # Don't process packages on multiple levels. (more details above)
-                        if source_name in previous_level_srpms:
+                    for pkg_name, pkg in pkgs_by_name.items():
+                        if pkg["source_name"] in previous_level_srpms:
                             continue
 
-                        # Look at all SRPMs that directly pull this RPM into the buildroot...
+                        pkg_rec = pkg["maintainer_recommendation"]
+                        pkg_rec_details = pkg["maintainer_recommendation_details"]
+
                         for buildroot_srpm_name in pkg["in_buildroot_of_srpm_name_req"]:
-                            buildroot_srpm = view_all_arches["source_pkgs_by_name"][buildroot_srpm_name]
+                            buildroot_srpm = source_pkgs_by_name[buildroot_srpm_name]
+                            br_rec = buildroot_srpm["maintainer_recommendation"]
 
-                            # ... and if they're in the previous group, assign their maintainer(s)
-
-                            # But limit this to only the ones with the highest score.
-                            all_the_previous_sublevels_of_this_buildroot_srpm = set()
-                            for buildroot_srpm_maintainer, buildroot_srpm_maintainer_scores in buildroot_srpm["maintainer_recommendation"].items():
-                                for buildroot_srpm_maintainer_score in buildroot_srpm_maintainer_scores:
-                                    buildroot_srpm_maintainer_score_level, buildroot_srpm_maintainer_score_sublevel = buildroot_srpm_maintainer_score
-                                    if not buildroot_srpm_maintainer_score_level == prev_level:
-                                        continue
-                                    all_the_previous_sublevels_of_this_buildroot_srpm.add(buildroot_srpm_maintainer_score_sublevel)
-                            if not all_the_previous_sublevels_of_this_buildroot_srpm:
+                            prev_sublevels = set()
+                            for br_maint, br_scores in br_rec.items():
+                                for br_score in br_scores:
+                                    if br_score[0] == prev_level:
+                                        prev_sublevels.add(br_score[1])
+                            if not prev_sublevels:
                                 continue
-                            the_highest_sublevel_of_this_buildroot_srpm = min(all_the_previous_sublevels_of_this_buildroot_srpm)
-                            the_score_I_care_about = (prev_level, the_highest_sublevel_of_this_buildroot_srpm)
+                            target_score = (prev_level, min(prev_sublevels))
 
-                            for buildroot_srpm_maintainer, buildroot_srpm_maintainer_scores in buildroot_srpm["maintainer_recommendation"].items():
+                            for br_maint, br_scores in br_rec.items():
+                                if target_score not in br_scores:
+                                    continue
 
-                                if the_score_I_care_about in buildroot_srpm_maintainer_scores:
+                                detect_tuple = (buildroot_srpm_name, pkg_name)
+                                if detect_tuple not in level_change_detection:
+                                    level_changes_made = True
+                                    level_change_detection.add(detect_tuple)
 
-                                    level_change_detection_tuple = (buildroot_srpm_name, pkg_name)
-                                    if level_change_detection_tuple not in level_change_detection:
-                                        level_changes_made = True
-                                        level_change_detection.add(level_change_detection_tuple)
+                                if br_maint not in pkg_rec:
+                                    pkg_rec[br_maint] = set()
+                                pkg_rec[br_maint].add(score)
 
-                                    # 1/  maintainer_recommendation
+                                level_details = pkg_rec_details.setdefault(level, {})
+                                sublevel_details = level_details.setdefault(sublevel, {})
+                                if br_maint not in sublevel_details:
+                                    sublevel_details[br_maint] = {"reasons": set(), "locations": set()}
+                                sublevel_details[br_maint]["locations"].add(buildroot_srpm_name)
 
-                                    if buildroot_srpm_maintainer not in pkg["maintainer_recommendation"]:
-                                        #pkg["maintainer_recommendation"][workload_maintainer] = set()
-                                        self.data["views_all_arches"][view_conf_id]["pkgs_by_name"][pkg_name]["maintainer_recommendation"][buildroot_srpm_maintainer] = set()
-
-                                    #pkg["maintainer_recommendation"][buildroot_srpm_maintainer].add(score)
-                                    self.data["views_all_arches"][view_conf_id]["pkgs_by_name"][pkg_name]["maintainer_recommendation"][buildroot_srpm_maintainer].add(score)
-
-                                    # 2/  maintainer_recommendation_details
-
-                                    if level not in pkg["maintainer_recommendation_details"]:
-                                        #pkg["maintainer_recommendation_details"][level] = {}
-                                        self.data["views_all_arches"][view_conf_id]["pkgs_by_name"][pkg_name]["maintainer_recommendation_details"][level] = {}
-                                    
-                                    if sublevel not in pkg["maintainer_recommendation_details"][level]:
-                                        #pkg["maintainer_recommendation_details"][level][sublevel] = {}
-                                        self.data["views_all_arches"][view_conf_id]["pkgs_by_name"][pkg_name]["maintainer_recommendation_details"][level][sublevel] = {}
-                                    
-                                    if buildroot_srpm_maintainer not in pkg["maintainer_recommendation_details"][level][sublevel]:
-                                        #pkg["maintainer_recommendation_details"][level][sublevel][buildroot_srpm_maintainer] = {}
-                                        #pkg["maintainer_recommendation_details"][level][sublevel][buildroot_srpm_maintainer]["reasons"] = {}
-                                        #pkg["maintainer_recommendation_details"][level][sublevel][buildroot_srpm_maintainer]["locations"] = {}
-                                        self.data["views_all_arches"][view_conf_id]["pkgs_by_name"][pkg_name]["maintainer_recommendation_details"][level][sublevel][buildroot_srpm_maintainer] = {}
-                                        self.data["views_all_arches"][view_conf_id]["pkgs_by_name"][pkg_name]["maintainer_recommendation_details"][level][sublevel][buildroot_srpm_maintainer]["reasons"] = set()
-                                        self.data["views_all_arches"][view_conf_id]["pkgs_by_name"][pkg_name]["maintainer_recommendation_details"][level][sublevel][buildroot_srpm_maintainer]["locations"] = set()
-
-                                    #pkg["maintainer_recommendation_details"][level][sublevel][buildroot_srpm_maintainer]["locations"].add(buildroot_srpm_name)
-                                    self.data["views_all_arches"][view_conf_id]["pkgs_by_name"][pkg_name]["maintainer_recommendation_details"][level][sublevel][buildroot_srpm_maintainer]["locations"].add(buildroot_srpm_name)
-
-
-                # Time to look at runtime dependencies!
-                #
-                # Take all packages that depend on the previous group and assign them
-                # to the maintainer of their superior package. Do this in a loop until
-                # there's nothing to assign.
-                #
-                # So this will deal with scores 0.1, 0.2, 0.3, ...
-
-                # Lie to the while loop so it runs at least once
                 sublevel_changes_made = True
                 sublevel_change_detection = set()
 
                 while sublevel_changes_made:
-
-                    # Reset its memories. Let it make some new real memories!!
                     sublevel_changes_made = False
-
-                    # Jump another sub-level down
                     prev_score = score
                     prev_sublevel = sublevel
-                    #sublevel += 1
                     sublevel = str(int(sublevel) + 1)
                     score = (level, sublevel)
-
                     log("    {}".format(score))
 
-                    for pkg_name, pkg in view_all_arches["pkgs_by_name"].items():
-                        source_name = pkg["source_name"]
-
-                        # Don't process packages on multiple levels. (more details above)
-                        if source_name in previous_level_srpms:
+                    for pkg_name, pkg in pkgs_by_name.items():
+                        if pkg["source_name"] in previous_level_srpms:
                             continue
 
-                        # Look at all of its superior packages (packages that require it)...
+                        pkg_rec = pkg["maintainer_recommendation"]
+                        pkg_rec_details = pkg["maintainer_recommendation_details"]
+
                         for superior_pkg_name in pkg["hard_dependency_of_pkg_names"]:
-                            superior_pkg = view_all_arches["pkgs_by_name"][superior_pkg_name]
+                            superior_pkg = pkgs_by_name[superior_pkg_name]
                             superior_srpm_name = superior_pkg["source_name"]
 
-                            # ... and if they're in the previous group, assign their maintainer(s)
-                            for superior_pkg_maintainer, superior_pkg_maintainer_scores in superior_pkg["maintainer_recommendation"].items():
-                                if prev_score in superior_pkg_maintainer_scores:
+                            for sup_maint, sup_scores in superior_pkg["maintainer_recommendation"].items():
+                                if prev_score not in sup_scores:
+                                    continue
 
-                                    sublevel_change_detection_tuple = (superior_pkg_name, pkg_name, superior_pkg_maintainer)
-                                    if sublevel_change_detection_tuple in sublevel_change_detection:
-                                        continue
-                                    else:
-                                        sublevel_changes_made = True
-                                        sublevel_change_detection.add(sublevel_change_detection_tuple)
-                                    
-                                    # 1/  maintainer_recommendation
+                                detect_tuple = (superior_pkg_name, pkg_name, sup_maint)
+                                if detect_tuple in sublevel_change_detection:
+                                    continue
+                                sublevel_changes_made = True
+                                sublevel_change_detection.add(detect_tuple)
 
-                                    if superior_pkg_maintainer not in pkg["maintainer_recommendation"]:
-                                        #pkg["maintainer_recommendation"][workload_maintainer] = set()
-                                        self.data["views_all_arches"][view_conf_id]["pkgs_by_name"][pkg_name]["maintainer_recommendation"][superior_pkg_maintainer] = set()
+                                if sup_maint not in pkg_rec:
+                                    pkg_rec[sup_maint] = set()
+                                pkg_rec[sup_maint].add(score)
 
-                                    #pkg["maintainer_recommendation"][superior_pkg_maintainer].add(score)
-                                    self.data["views_all_arches"][view_conf_id]["pkgs_by_name"][pkg_name]["maintainer_recommendation"][superior_pkg_maintainer].add(score)
+                                level_details = pkg_rec_details.setdefault(level, {})
+                                sublevel_details = level_details.setdefault(sublevel, {})
+                                if sup_maint not in sublevel_details:
+                                    sublevel_details[sup_maint] = {"reasons": set(), "locations": set()}
 
-                                    # 2/  maintainer_recommendation_details
+                                sup_locations = superior_pkg["maintainer_recommendation_details"][level][prev_sublevel][sup_maint]["locations"]
+                                sublevel_details[sup_maint]["locations"].update(sup_locations)
+                                sublevel_details[sup_maint]["reasons"].add((superior_pkg_name, superior_srpm_name, pkg_name))
 
-                                    if level not in pkg["maintainer_recommendation_details"]:
-                                        #pkg["maintainer_recommendation_details"][level] = {}
-                                        self.data["views_all_arches"][view_conf_id]["pkgs_by_name"][pkg_name]["maintainer_recommendation_details"][level] = {}
-                                    
-                                    if sublevel not in pkg["maintainer_recommendation_details"][level]:
-                                        #pkg["maintainer_recommendation_details"][level][sublevel] = {}
-                                        self.data["views_all_arches"][view_conf_id]["pkgs_by_name"][pkg_name]["maintainer_recommendation_details"][level][sublevel] = {}
-                                    
-                                    if superior_pkg_maintainer not in pkg["maintainer_recommendation_details"][level][sublevel]:
-                                        #pkg["maintainer_recommendation_details"][level][sublevel][superior_pkg_maintainer] = {}
-                                        #pkg["maintainer_recommendation_details"][level][sublevel][superior_pkg_maintainer]["reasons"] = {}
-                                        #pkg["maintainer_recommendation_details"][level][sublevel][superior_pkg_maintainer]["locations"] = {}
-                                        self.data["views_all_arches"][view_conf_id]["pkgs_by_name"][pkg_name]["maintainer_recommendation_details"][level][sublevel][superior_pkg_maintainer] = {}
-                                        self.data["views_all_arches"][view_conf_id]["pkgs_by_name"][pkg_name]["maintainer_recommendation_details"][level][sublevel][superior_pkg_maintainer]["reasons"] = set()
-                                        self.data["views_all_arches"][view_conf_id]["pkgs_by_name"][pkg_name]["maintainer_recommendation_details"][level][sublevel][superior_pkg_maintainer]["locations"] = set()
-
-                                    # Copy the locations from the superior package one sublevel up
-                                    locations = superior_pkg["maintainer_recommendation_details"][level][prev_sublevel][superior_pkg_maintainer]["locations"]
-                                    self.data["views_all_arches"][view_conf_id]["pkgs_by_name"][pkg_name]["maintainer_recommendation_details"][level][sublevel][superior_pkg_maintainer]["locations"].update(locations)
-
-                                    reason = (superior_pkg_name, superior_srpm_name, pkg_name)
-                                    #pkg["maintainer_recommendation_details"][level][sublevel][superior_pkg_maintainer]["reasons"].add(reason)
-                                    self.data["views_all_arches"][view_conf_id]["pkgs_by_name"][pkg_name]["maintainer_recommendation_details"][level][sublevel][superior_pkg_maintainer]["reasons"].add(reason)
-
-                
-                # Now add this info to the source packages
-                for pkg_name, pkg in view_all_arches["pkgs_by_name"].items():
+                for pkg_name, pkg in pkgs_by_name.items():
                     source_name = pkg["source_name"]
-
-                    # 1/  maintainer_recommendation
+                    srpm_entry = source_pkgs_by_name[source_name]
 
                     for maintainer, maintainer_scores in pkg["maintainer_recommendation"].items():
-
-                        if maintainer not in self.data["views_all_arches"][view_conf_id]["source_pkgs_by_name"][source_name]["maintainer_recommendation"]:
-                            self.data["views_all_arches"][view_conf_id]["source_pkgs_by_name"][source_name]["maintainer_recommendation"][maintainer] = set()
-                        
-                        self.data["views_all_arches"][view_conf_id]["source_pkgs_by_name"][source_name]["maintainer_recommendation"][maintainer].update(maintainer_scores)
-
-
-                        # Add it here so it's not processed again in the another level
+                        srpm_rec = srpm_entry["maintainer_recommendation"]
+                        if maintainer not in srpm_rec:
+                            srpm_rec[maintainer] = set()
+                        srpm_rec[maintainer].update(maintainer_scores)
                         this_level_srpms.add(source_name)
-                    
-                    # 2/  maintainer_recommendation_details
 
+                    srpm_rec_details = srpm_entry["maintainer_recommendation_details"]
                     for loop_level, loop_sublevels in pkg["maintainer_recommendation_details"].items():
-
-                        if loop_level not in self.data["views_all_arches"][view_conf_id]["source_pkgs_by_name"][source_name]["maintainer_recommendation_details"]:
-                            self.data["views_all_arches"][view_conf_id]["source_pkgs_by_name"][source_name]["maintainer_recommendation_details"][loop_level] = {}
-
+                        level_d = srpm_rec_details.setdefault(loop_level, {})
                         for loop_sublevel, maintainers in loop_sublevels.items():
+                            sublevel_d = level_d.setdefault(loop_sublevel, {})
+                            for maintainer, maint_details in maintainers.items():
+                                if maintainer not in sublevel_d:
+                                    sublevel_d[maintainer] = {"reasons": set(), "locations": set()}
+                                sublevel_d[maintainer]["reasons"].update(maint_details["reasons"])
+                                sublevel_d[maintainer]["locations"].update(maint_details["locations"])
 
-                            if loop_sublevel not in self.data["views_all_arches"][view_conf_id]["source_pkgs_by_name"][source_name]["maintainer_recommendation_details"][loop_level]:
-                                self.data["views_all_arches"][view_conf_id]["source_pkgs_by_name"][source_name]["maintainer_recommendation_details"][loop_level][loop_sublevel] = {}
-
-                            for maintainer, maintainer_details in maintainers.items():
-
-                                if maintainer not in self.data["views_all_arches"][view_conf_id]["source_pkgs_by_name"][source_name]["maintainer_recommendation_details"][loop_level][loop_sublevel]:
-                                    self.data["views_all_arches"][view_conf_id]["source_pkgs_by_name"][source_name]["maintainer_recommendation_details"][loop_level][loop_sublevel][maintainer] = {}
-                                    self.data["views_all_arches"][view_conf_id]["source_pkgs_by_name"][source_name]["maintainer_recommendation_details"][loop_level][loop_sublevel][maintainer]["reasons"] = set()
-                                    self.data["views_all_arches"][view_conf_id]["source_pkgs_by_name"][source_name]["maintainer_recommendation_details"][loop_level][loop_sublevel][maintainer]["locations"] = set()
-
-                                reasons = maintainer_details["reasons"]
-                                locations = maintainer_details["locations"]
-
-                                self.data["views_all_arches"][view_conf_id]["source_pkgs_by_name"][source_name]["maintainer_recommendation_details"][loop_level][loop_sublevel][maintainer]["reasons"].update(reasons)
-                                self.data["views_all_arches"][view_conf_id]["source_pkgs_by_name"][source_name]["maintainer_recommendation_details"][loop_level][loop_sublevel][maintainer]["locations"].update(locations)
-
-
-
-
-                # And set stuff for the next level
                 prev_level = level
                 level = str(int(level) + 1)
-                #level += 1
                 sublevel = str(0)
                 score = (level, sublevel)
                 previous_level_srpms.update(this_level_srpms)
                 this_level_srpms = set()
 
-
-
-            # And elect the best owners for each srpm
-            for source_name, srpm in view_all_arches["source_pkgs_by_name"].items():
-
-                if not srpm["maintainer_recommendation_details"]:
+            for source_name, srpm in source_pkgs_by_name.items():
+                rec_details = srpm["maintainer_recommendation_details"]
+                if not rec_details:
                     continue
 
-                level_numbers = set()
-                for level_string in srpm["maintainer_recommendation_details"].keys():
-                    level_numbers.add(int(level_string))
+                lowest_level_int = min(int(k) for k in rec_details)
+                lowest_level = str(lowest_level_int)
 
-                lowest_level_int = min(level_numbers)
-                lowest_level = str(min(level_numbers))
-
-                if not srpm["maintainer_recommendation_details"][lowest_level]:
+                if not rec_details[lowest_level]:
                     continue
 
-                sublevel_numbers = set()
-                for sublevel_string in srpm["maintainer_recommendation_details"][lowest_level].keys():
-                    sublevel_numbers.add(int(sublevel_string))
-                lowest_sublevel = str(min(sublevel_numbers))
+                lowest_sublevel = str(min(int(k) for k in rec_details[lowest_level]))
+                best_level_data = rec_details[lowest_level][lowest_sublevel]
 
-                maintainers_with_the_best_score = set(srpm["maintainer_recommendation_details"][lowest_level][lowest_sublevel].keys())
-
-                highest_number_of_dependencies = 0
+                highest_deps = 0
                 best_maintainers = set()
-                for maint in maintainers_with_the_best_score:
+                use_locations = lowest_level_int > 0 and lowest_sublevel == "0"
 
-                    # If we're looking at a direct build dependency, count the number of locations == SRPMs that directly need this
-                    # And in all other cases count the reasons == the number of packages that runtime require
-                    # (in case of 0,0 len(reasons) is always 1 as it just says "directly required" so that works fine)
-                    if lowest_level_int > 0 and lowest_sublevel == "0":
-                        number_of_dependencies = len(srpm["maintainer_recommendation_details"][lowest_level][lowest_sublevel][maint]["locations"])
-                    else:
-                        number_of_dependencies = len(srpm["maintainer_recommendation_details"][lowest_level][lowest_sublevel][maint]["reasons"])
-
-                    if number_of_dependencies > highest_number_of_dependencies:
-                        highest_number_of_dependencies = number_of_dependencies
+                for maint, maint_data in best_level_data.items():
+                    ndeps = len(maint_data["locations"]) if use_locations else len(maint_data["reasons"])
+                    if ndeps > highest_deps:
+                        highest_deps = ndeps
                         best_maintainers = set()
-
-                    if number_of_dependencies == highest_number_of_dependencies:
+                    if ndeps == highest_deps:
                         best_maintainers.add(maint)
 
-                self.data["views_all_arches"][view_conf_id]["source_pkgs_by_name"][source_name]["best_maintainers"].update(best_maintainers)
+                srpm["best_maintainers"].update(best_maintainers)
 
-
-
-                     
         log("")
         log("  DONE!")
         log("")
@@ -3496,11 +3442,23 @@ class Analyzer():
 
             self._record_metric("finished _analyze_repos()")
 
+            # Compute repo fingerprints for incremental cache
+            log("")
+            log("=====  Computing repo fingerprints =====")
+            log("")
+            self._compute_repo_fingerprints()
+
+            # Pre-check which workloads are cached so we can skip unchanged envs
+            log("")
+            log("=====  Pre-checking incremental cache =====")
+            log("")
+            env_all_cached = self._pre_check_workload_cache()
+
             # Environments
             log("")
             log("=====  Analyzing Environments =====")
             log("")
-            self._analyze_envs()
+            self._analyze_envs(env_all_cached=env_all_cached)
 
             self._record_metric("finished _analyze_envs()")
 
@@ -3587,10 +3545,22 @@ class Analyzer():
             self._record_metric("finished _recommend_maintainers()")
 
 
-            # Finally, save the cache for next time
-            dump_data(self.settings["root_log_deps_cache_path"], self.cache["root_log_deps"]["next"])
+            # Finally, save the caches for next time
+            try:
+                dump_data(self.settings["root_log_deps_cache_path"], self.cache["root_log_deps"]["next"])
+            except PermissionError:
+                log("Warning: Could not write root log deps cache (permission denied)")
 
             self._record_metric("finished dumping the root log data cache")
+
+            # Save the incremental cache
+            log("")
+            log("=====  Saving incremental cache =====")
+            log("")
+            log(f"  Cache stats: {self._cache_hits} hits, {self._cache_misses} misses")
+            self._save_incremental_cache()
+
+            self._record_metric("finished saving incremental cache")
 
 
         self._record_metric("finished analyze_things()")           

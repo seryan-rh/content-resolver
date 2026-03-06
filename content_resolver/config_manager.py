@@ -25,6 +25,7 @@ class ConfigManager:
         parser.add_argument("--dnf-cache-dir", dest="dnf_cache_dir_override", help="Override the dnf cache_dir.")
         parser.add_argument("--parallel-max", dest="parallel_max", default=os.cpu_count(), type=int, help="Max parallel processes to run")
         parser.add_argument("--labels", dest="selected_labels", help="Comma-separated list of label IDs to process. If not specified, all labels are processed. Only workloads, environments, views, and repos matching the specified labels will be analyzed.")
+        parser.add_argument("--no-incremental-cache", dest="no_incremental_cache", action='store_true', help="Disable incremental caching. Forces a full re-analysis of all workloads.")
         args = parser.parse_args()
 
         settings["configs"] = args.configs
@@ -34,6 +35,7 @@ class ConfigManager:
         settings["dnf_cache_dir_override"] = args.dnf_cache_dir_override
         settings["parallel_max"] = args.parallel_max
         settings["selected_labels"] = args.selected_labels
+        settings["no_incremental_cache"] = args.no_incremental_cache
 
         settings["root_log_deps_cache_path"] = "cache_root_log_deps.json"
 

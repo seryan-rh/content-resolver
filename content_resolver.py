@@ -55,6 +55,9 @@ def main():
     # Stage 1: Data collection and analysis using DNF
     # -------------------------------------------------
 
+    import os
+    original_cwd = os.getcwd()
+
     # measuring time of execution
     time_started = datetime_now_string()
     config_manager = ConfigManager()
@@ -72,6 +75,8 @@ def main():
         configs =  config_manager.get_configs()
         analyzer = Analyzer(configs, settings)
         data = analyzer.analyze_things()
+
+        os.chdir(original_cwd)
 
         if settings["dev_buildroot"]:
             dump_data("cache_configs.json", configs)
